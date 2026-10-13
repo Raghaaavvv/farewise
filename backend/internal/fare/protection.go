@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"math/rand"
 	"sync"
@@ -35,15 +36,15 @@ func DemoProviderPolicy() ProviderPolicy {
 var ErrProviderBusy = errors.New("provider request queue is full")
 
 type cacheEntry struct {
-	quote   Quote
+	quotes  []Quote
 	expires time.Time
 	used    uint64
 }
 
 type estimateFlight struct {
-	done  chan struct{}
-	quote Quote
-	err   error
+	done   chan struct{}
+	quotes []Quote
+	err    error
 }
 
 // ProtectedProvider composes a Provider with a success cache, request
@@ -58,20 +59,35 @@ type ProtectedProvider struct {
 	tokens   float64
 	refilled time.Time
 	cooldown time.Time
+	logger   *slog.Logger
 }
 
-func NewProtectedProvider(p Provider, policy ProviderPolicy) (*ProtectedProvider, error) {
+type ProtectionOption func(*ProtectedProvider)
+
+func WithProviderLogger(logger *slog.Logger) ProtectionOption {
+	return func(p *ProtectedProvider) {
+		if logger != nil {
+			p.logger = logger
+		}
+	}
+}
+
+func NewProtectedProvider(p Provider, policy ProviderPolicy, options ...ProtectionOption) (*ProtectedProvider, error) {
 	if p == nil || math.IsNaN(policy.RequestsPerSecond) || math.IsInf(policy.RequestsPerSecond, 0) ||
 		policy.RequestsPerSecond <= 0 || policy.Burst < 1 || policy.CacheTTL <= 0 ||
 		policy.MaxCacheEntries < 1 || policy.MaxInFlight < 1 || policy.MaxAttempts < 1 ||
 		policy.BaseBackoff <= 0 || policy.MaxBackoff < policy.BaseBackoff {
 		return nil, errors.New("invalid provider protection policy")
 	}
-	return &ProtectedProvider{
+	protected := &ProtectedProvider{
 		provider: p, policy: policy, cache: make(map[[32]byte]cacheEntry),
 		flights: make(map[[32]byte]*estimateFlight), tokens: float64(policy.Burst),
-		refilled: time.Now(),
-	}, nil
+		refilled: time.Now(), logger: slog.Default(),
+	}
+	for _, option := range options {
+		option(protected)
+	}
+	return protected, nil
 }
 
 func (p *ProtectedProvider) ID() string   { return p.provider.ID() }
@@ -86,9 +102,11 @@ func tripCacheKey(t Trip) [32]byte {
 		t.Passengers, t.RideType, t.Scenario, t.DistanceKM)))
 }
 
-func (p *ProtectedProvider) Estimate(ctx context.Context, trip Trip) (Quote, error) {
+func (p *ProtectedProvider) Estimate(ctx context.Context, trip Trip) (quotes []Quote, err error) {
+	start, cacheState := time.Now(), "miss"
+	defer func() { logProvider(ctx, p.logger, "provider.lookup", p.ID(), cacheState, start, quotes, err) }()
 	if err := ctx.Err(); err != nil {
-		return Quote{}, err
+		return nil, err
 	}
 	key := tripCacheKey(trip)
 	p.mu.Lock()
@@ -104,22 +122,26 @@ func (p *ProtectedProvider) Estimate(ctx context.Context, trip Trip) (Quote, err
 		entry.used = p.sequence
 		p.cache[key] = entry
 		p.mu.Unlock()
-		quote := cloneQuote(entry.quote)
-		quote.Cached = true
-		return quote, nil
+		quotes := cloneQuotes(entry.quotes)
+		for i := range quotes {
+			quotes[i].Cached = true
+		}
+		cacheState = "hit"
+		return quotes, nil
 	}
 	if flight, ok := p.flights[key]; ok {
 		p.mu.Unlock()
+		cacheState = "coalesced"
 		select {
 		case <-ctx.Done():
-			return Quote{}, ctx.Err()
+			return nil, ctx.Err()
 		case <-flight.done:
-			return cloneQuote(flight.quote), flight.err
+			return cloneQuotes(flight.quotes), flight.err
 		}
 	}
 	if len(p.flights) >= p.policy.MaxInFlight {
 		p.mu.Unlock()
-		return Quote{}, ErrProviderBusy
+		return nil, ErrProviderBusy
 	}
 	flight := &estimateFlight{done: make(chan struct{})}
 	p.flights[key] = flight
@@ -127,9 +149,14 @@ func (p *ProtectedProvider) Estimate(ctx context.Context, trip Trip) (Quote, err
 
 	// The leader owns this request's context. Its cancellation ends the shared
 	// attempt; a waiting caller's cancellation does not cancel the leader.
-	quote, err := p.estimate(ctx, trip)
+	quotes, err = p.estimate(ctx, trip)
+	quotes = cloneQuotes(quotes)
+	for i := range quotes {
+		quotes[i].Cached = false
+	}
 	p.mu.Lock()
-	if err == nil && validQuote(quote) {
+	deadline, cacheable := cacheDeadline(quotes, time.Now(), p.policy.CacheTTL)
+	if err == nil && cacheable {
 		if len(p.cache) >= p.policy.MaxCacheEntries {
 			var oldest [32]byte
 			var used uint64 = math.MaxUint64
@@ -141,50 +168,33 @@ func (p *ProtectedProvider) Estimate(ctx context.Context, trip Trip) (Quote, err
 			delete(p.cache, oldest)
 		}
 		p.sequence++
-		quote.Cached = false
-		p.cache[key] = cacheEntry{cloneQuote(quote), time.Now().Add(p.policy.CacheTTL), p.sequence}
+		p.cache[key] = cacheEntry{cloneQuotes(quotes), deadline, p.sequence}
 	}
-	flight.quote, flight.err = cloneQuote(quote), err
+	flight.quotes, flight.err = cloneQuotes(quotes), err
 	delete(p.flights, key)
 	close(flight.done)
 	p.mu.Unlock()
-	return cloneQuote(quote), err
+	return cloneQuotes(quotes), err
 }
 
-func validQuote(q Quote) bool {
-	return q.Status == "available" && q.AmountCents != nil && *q.AmountCents > 0 &&
-		q.ETAMinutes != nil && *q.ETAMinutes >= 0
-}
-
-// The pointer fields must not let a caller mutate a cached or shared result.
-func cloneQuote(q Quote) Quote {
-	if q.AmountCents != nil {
-		amount := *q.AmountCents
-		q.AmountCents = &amount
-	}
-	if q.ETAMinutes != nil {
-		eta := *q.ETAMinutes
-		q.ETAMinutes = &eta
-	}
-	return q
-}
-
-func (p *ProtectedProvider) estimate(ctx context.Context, trip Trip) (Quote, error) {
+func (p *ProtectedProvider) estimate(ctx context.Context, trip Trip) ([]Quote, error) {
 	for attempt := 0; attempt < p.policy.MaxAttempts; attempt++ {
 		// Every attempt, including a retry, consumes a provider token.
 		if err := p.waitForToken(ctx); err != nil {
-			return Quote{}, err
+			return nil, err
 		}
-		quote, err := p.provider.Estimate(ctx, trip)
+		start := time.Now()
+		quotes, err := p.provider.Estimate(ctx, trip)
+		logProvider(ctx, p.logger, "provider.attempt", p.ID(), "miss", start, quotes, err, "attempt", attempt+1)
 		if err == nil {
 			if err := ctx.Err(); err != nil {
-				return Quote{}, err
+				return nil, err
 			}
-			return quote, nil
+			return quotes, nil
 		}
 		var upstream *ProviderHTTPError
 		if !errors.As(err, &upstream) || !upstream.Retryable() {
-			return Quote{}, err
+			return quotes, err
 		}
 		delay := p.backoff(attempt)
 		if retryAfter, ok := ParseRetryAfter(upstream.RetryAfter, time.Now()); ok && retryAfter > delay {
@@ -199,11 +209,13 @@ func (p *ProtectedProvider) estimate(ctx context.Context, trip Trip) (Quote, err
 			p.mu.Unlock()
 		}
 		// Record the cooldown even when no attempts remain, protecting other trips.
-		if attempt+1 == p.policy.MaxAttempts {
-			return Quote{}, err
+		// Keep partial products without retrying the batch, but still record a
+		// provider cooldown when a partial response carries a 429/Retry-After.
+		if len(quotes) > 0 || attempt+1 == p.policy.MaxAttempts {
+			return quotes, err
 		}
 		if err := waitContext(ctx, delay); err != nil {
-			return Quote{}, err
+			return nil, err
 		}
 	}
 	panic("validated retry policy must allow at least one attempt")

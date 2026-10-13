@@ -8,12 +8,14 @@ import (
 	"time"
 )
 
-// Provider is the seam for a future permitted live integration. The demo
-// implementations never make network requests or use real pricing algorithms.
+// Provider is the seam for a live or model adapter. Implementations must honor
+// ctx, use context-aware HTTP requests, and return stable IDs and timestamps
+// per product. A nonempty slice with an error may contain usable partial results.
+// Demo implementations never contact real providers or use trained models.
 type Provider interface {
 	ID() string
 	Name() string
-	Estimate(context.Context, Trip) (Quote, error)
+	Estimate(context.Context, Trip) ([]Quote, error)
 }
 
 type DemoProvider struct {
@@ -34,16 +36,16 @@ func DemoProviders() []Provider {
 	}
 }
 
-func (p DemoProvider) Estimate(ctx context.Context, trip Trip) (Quote, error) {
+func (p DemoProvider) Estimate(ctx context.Context, trip Trip) ([]Quote, error) {
 	timer := time.NewTimer(p.Latency)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return Quote{}, ctx.Err()
+		return nil, ctx.Err()
 	case <-timer.C:
 	}
 	if trip.Scenario == "outage" && p.ID() == "ryde" {
-		return Quote{}, errors.New("simulated provider failure")
+		return nil, errors.New("simulated provider failure")
 	}
 	capacity, product := 4, "Standard · demo"
 	if trip.RideType == "six" {
@@ -51,8 +53,9 @@ func (p DemoProvider) Estimate(ctx context.Context, trip Trip) (Quote, error) {
 	}
 	quote := Quote{
 		ProviderID: p.ID(), ProviderName: p.Name(), ServiceName: product,
+		ProductID: trip.RideType, ProductType: ProductStandard,
 		Status: "available", Currency: "SGD", Source: "simulated",
-		Capacity: capacity, CollectedAt: time.Now().UTC(),
+		Capacity: capacity, FetchedAt: time.Now().UTC(),
 		Message:         "Illustrative quote. Not offered by the provider.",
 		FeesDescription: "Demo total includes an invented airport fee when applicable. No real fees, ERP, discounts or availability are checked.",
 	}
@@ -76,6 +79,41 @@ func (p DemoProvider) Estimate(ctx context.Context, trip Trip) (Quote, error) {
 		eta += 6
 	}
 	amount = (amount + 5) / 10 * 10
-	quote.AmountCents, quote.ETAMinutes = &amount, &eta
-	return quote, nil
+	quote.Fare, quote.ETAMinutes = &FareRange{MinFare: amount, MaxFare: amount}, &eta
+	// Deliberately different lifetimes exercise per-product expiry in the demo.
+	lifetimes := map[string]time.Duration{"grab": 90 * time.Second, "gojek": 2 * time.Minute, "zig": 75 * time.Second, "ryde": time.Minute}
+	ttl := lifetimes[p.ID()]
+	if ttl == 0 {
+		ttl = 2 * time.Minute
+	}
+	quote.ExpiresAt = quote.FetchedAt.Add(ttl)
+	quotes := []Quote{quote}
+	switch p.ID() {
+	case "grab":
+		premium := quote
+		premium.ProductID, premium.ProductType, premium.ServiceName = trip.RideType+"-premium", ProductPremium, "Premium · demo"
+		premium.Fare = &FareRange{amount * 140 / 100, amount * 160 / 100, true}
+		premium.ExpiresAt = quote.FetchedAt.Add(45 * time.Second)
+		quotes = append(quotes, premium)
+	case "zig":
+		taxi := quote
+		taxi.ProductID, taxi.ProductType, taxi.ServiceName = trip.RideType+"-taxi", ProductTaxi, "Metered taxi · demo"
+		taxi.Fare = &FareRange{amount * 90 / 100, amount * 120 / 100, true}
+		taxi.ExpiresAt = quote.FetchedAt.Add(50 * time.Second)
+		quotes = append(quotes, taxi)
+	case "ryde":
+		if trip.RideType == "standard" && trip.Passengers <= 2 {
+			pool := quote
+			pool.ProductID, pool.ProductType, pool.ServiceName, pool.Capacity = "pool", ProductPool, "Shared ride · demo", 2
+			pool.Fare = &FareRange{amount * 70 / 100, amount * 85 / 100, true}
+			pool.ExpiresAt = quote.FetchedAt.Add(40 * time.Second)
+			quotes = append(quotes, pool)
+		}
+	case "gojek":
+		if trip.Scenario == "rain" {
+			quotes[0].ETAMinutes, quotes[0].Status = nil, "partial"
+			quotes[0].Message = "Demo fare is available, but the pickup estimate is missing."
+		}
+	}
+	return quotes, nil
 }

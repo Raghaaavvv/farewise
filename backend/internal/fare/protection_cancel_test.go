@@ -36,11 +36,11 @@ func TestFlightCapacityAndLeaderCancellation(t *testing.T) {
 	policy.MaxInFlight = 1
 	var calls atomic.Int32
 	started := make(chan struct{}, 2)
-	p := protectedForTest(t, functionProvider{"cancel", func(ctx context.Context, _ Trip) (Quote, error) {
+	p := protectedForTest(t, functionProvider{"cancel", func(ctx context.Context, _ Trip) ([]Quote, error) {
 		calls.Add(1)
 		started <- struct{}{}
 		<-ctx.Done()
-		return Quote{}, ctx.Err()
+		return nil, ctx.Err()
 	}}, policy)
 	trip := sampleTrip(t)
 	leader, cancel := context.WithCancel(context.Background())
@@ -68,9 +68,9 @@ func TestEachRetryConsumesAToken(t *testing.T) {
 	var calls atomic.Int32
 	policy := fastPolicy()
 	policy.RequestsPerSecond, policy.Burst = 1, 1
-	p := protectedForTest(t, functionProvider{"retry", func(context.Context, Trip) (Quote, error) {
+	p := protectedForTest(t, functionProvider{"retry", func(context.Context, Trip) ([]Quote, error) {
 		calls.Add(1)
-		return Quote{}, &ProviderHTTPError{StatusCode: 503}
+		return nil, &ProviderHTTPError{StatusCode: 503}
 	}}, policy)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()

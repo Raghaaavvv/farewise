@@ -479,6 +479,27 @@ h1 em {
   gap: 15px;
   padding: 4px 0 18px;
 }
+
+.results-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: flex-end;
+}
+
+.quote-validity {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 6px;
+}
+
+.quote-price strong.fare-range {
+  font-size: 18px;
+  max-width: 160px;
+  display: inline-block;
+  white-space: normal;
+}
 .eyebrow.small {
   font-size: 9px;
   letter-spacing: 1.3px;

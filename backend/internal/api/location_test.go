@@ -58,7 +58,11 @@ func TestCompareUsesActualDeviceCoordinates(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &comparison); err != nil {
 		t.Fatal(err)
 	}
-	if comparison.Trip.Pickup.Latitude != 1.36 || comparison.Trip.Pickup.Longitude != 103.989 || len(comparison.Quotes) != 4 {
+	providers := make(map[string]bool)
+	for _, quote := range comparison.Quotes {
+		providers[quote.ProviderID] = true
+	}
+	if comparison.Trip.Pickup.Latitude != 1.36 || comparison.Trip.Pickup.Longitude != 103.989 || len(providers) != 4 {
 		t.Fatal("comparison lost device coordinates or provider results")
 	}
 }

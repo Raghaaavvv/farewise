@@ -59,20 +59,40 @@ type Trip struct {
 	DistanceKM float64  `json:"distanceKm"`
 }
 
+type ProductType string
+
+const (
+	ProductStandard ProductType = "standard"
+	ProductPremium  ProductType = "premium"
+	ProductPool     ProductType = "pool"
+	ProductTaxi     ProductType = "taxi"
+)
+
+// A point fare is represented by equal bounds, never by a separate field.
+// IsEstimateRange describes the shape, not a calibrated confidence level.
+type FareRange struct {
+	MinFare         int  `json:"minFare"`
+	MaxFare         int  `json:"maxFare"`
+	IsEstimateRange bool `json:"isEstimateRange"`
+}
+
 type Quote struct {
-	ProviderID      string    `json:"providerId"`
-	ProviderName    string    `json:"providerName"`
-	ServiceName     string    `json:"serviceName"`
-	Status          string    `json:"status"`
-	Currency        string    `json:"currency"`
-	AmountCents     *int      `json:"amountCents"`
-	ETAMinutes      *int      `json:"etaMinutes"`
-	Source          string    `json:"source"`
-	CollectedAt     time.Time `json:"collectedAt"`
-	Cached          bool      `json:"cached"`
-	Capacity        int       `json:"capacity"`
-	Message         string    `json:"message"`
-	FeesDescription string    `json:"feesDescription"`
+	ProviderID      string      `json:"providerId"`
+	ProviderName    string      `json:"providerName"`
+	ProductID       string      `json:"productId"`
+	ProductType     ProductType `json:"productType"`
+	ServiceName     string      `json:"serviceName"`
+	Status          string      `json:"status"`
+	Currency        string      `json:"currency"`
+	Fare            *FareRange  `json:"fare"`
+	ETAMinutes      *int        `json:"etaMinutes"`
+	Source          string      `json:"source"`
+	FetchedAt       time.Time   `json:"fetchedAt"`
+	ExpiresAt       time.Time   `json:"expiresAt"`
+	Cached          bool        `json:"cached"`
+	Capacity        int         `json:"capacity"`
+	Message         string      `json:"message"`
+	FeesDescription string      `json:"feesDescription"`
 }
 
 type Comparison struct {

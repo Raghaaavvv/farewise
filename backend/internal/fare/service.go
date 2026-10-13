@@ -3,18 +3,45 @@ package fare
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"math"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 )
 
 type Service struct {
 	providers []Provider
 	timeout   time.Duration
+	slots     chan struct{}
+	logger    *slog.Logger
 }
 
-func NewService(providers []Provider, timeout time.Duration) *Service {
-	return &Service{providers: providers, timeout: timeout}
+type ServiceOption func(*Service)
+
+func WithMaxConcurrentProviders(limit int) ServiceOption {
+	if limit < 1 {
+		panic("provider concurrency limit must be positive")
+	}
+	return func(s *Service) { s.slots = make(chan struct{}, limit) }
+}
+
+func WithServiceLogger(logger *slog.Logger) ServiceOption {
+	return func(s *Service) {
+		if logger != nil {
+			s.logger = logger
+		}
+	}
+}
+
+func NewService(providers []Provider, timeout time.Duration, options ...ServiceOption) *Service {
+	s := &Service{providers: append([]Provider(nil), providers...), timeout: timeout,
+		slots: make(chan struct{}, 4), logger: slog.Default()}
+	for _, option := range options {
+		option(s)
+	}
+	return s
 }
 
 func Validate(request Request) (Trip, error) {
@@ -59,70 +86,148 @@ func haversine(a, b Location) float64 {
 
 func (s *Service) Compare(ctx context.Context, trip Trip) Comparison {
 	now := time.Now().UTC()
+	// One total budget includes worker queueing and the shared semaphore wait.
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
 	comparison := Comparison{
 		Mode: "demo", Notice: "All fares and pickup times are simulated. No provider has been contacted.",
 		Trip: trip, Quotes: make([]Quote, 0, len(s.providers)), CollectedAt: now,
-		ExpiresAt: now.Add(2 * time.Minute),
+		ExpiresAt: now.Add(30 * time.Second),
 	}
-	// Query adapters concurrently; each result has an independent deadline.
-	results := make(chan Quote, len(s.providers))
+	jobs := make(chan Provider, len(s.providers))
+	results := make(chan []Quote, len(s.providers))
 	for _, provider := range s.providers {
-		go func(p Provider) {
-			deadline, cancel := context.WithTimeout(ctx, s.timeout)
-			defer cancel()
-			// Buffered channel also accommodates an adapter that responds after
-			// its deadline. Real adapters must still use context-aware HTTP calls.
-			type result struct {
-				quote Quote
-				err   error
-			}
-			ch := make(chan result, 1)
-			go func() { q, err := p.Estimate(deadline, trip); ch <- result{q, err} }()
-			var quote Quote
-			var err error
-			select {
-			case r := <-ch:
-				quote, err = r.quote, r.err
-			case <-deadline.Done():
-				err = deadline.Err()
-			}
-			if err != nil || !validQuote(quote) {
-				message := "This provider is unavailable in the demo scenario."
-				if errors.Is(err, context.DeadlineExceeded) {
-					message = "This provider did not respond in time."
-				}
-				quote = Quote{ProviderID: p.ID(), ProviderName: p.Name(), Status: "unavailable", Currency: "SGD", Source: "simulated", CollectedAt: time.Now().UTC(), Message: message}
-			}
-			results <- quote
-		}(provider)
+		jobs <- provider
 	}
-	var oldestCollectedAt time.Time
-	for range s.providers {
-		quote := <-results
-		comparison.Quotes = append(comparison.Quotes, quote)
-		// Cache hits retain their real collection time and cannot extend the
-		// display lifetime simply because another comparison was requested.
-		if validQuote(quote) && !quote.CollectedAt.IsZero() &&
-			(oldestCollectedAt.IsZero() || quote.CollectedAt.Before(oldestCollectedAt)) {
-			oldestCollectedAt = quote.CollectedAt
+	close(jobs)
+	var workers sync.WaitGroup
+	for i := 0; i < min(len(s.providers), cap(s.slots)); i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for provider := range jobs {
+				results <- s.callProvider(ctx, provider, trip)
+			}
+		}()
+	}
+	// Direct calls keep permits until the adapter actually exits. No detached
+	// goroutine hides an adapter that ignores context; honoring it is required.
+	workers.Wait()
+	close(results)
+	finishedAt := time.Now()
+	var oldestFetchedAt, earliestExpiry time.Time
+	for quotes := range results {
+		for i := range quotes {
+			quote := &quotes[i]
+			// A short-lived product can expire while another adapter is running.
+			if quote.Status != "unavailable" && !quote.ExpiresAt.After(finishedAt) {
+				quote.Status = "expired"
+			}
+			if quote.Fare == nil || quote.Status == "unavailable" {
+				continue
+			}
+			if oldestFetchedAt.IsZero() || quote.FetchedAt.Before(oldestFetchedAt) {
+				oldestFetchedAt = quote.FetchedAt
+			}
+			if earliestExpiry.IsZero() || quote.ExpiresAt.Before(earliestExpiry) {
+				earliestExpiry = quote.ExpiresAt
+			}
 		}
+		comparison.Quotes = append(comparison.Quotes, quotes...)
 	}
-	if !oldestCollectedAt.IsZero() {
-		comparison.CollectedAt = oldestCollectedAt
-		comparison.ExpiresAt = oldestCollectedAt.Add(2 * time.Minute)
+	if !oldestFetchedAt.IsZero() {
+		comparison.CollectedAt = oldestFetchedAt
+		comparison.ExpiresAt = earliestExpiry
 	}
 	sort.Slice(comparison.Quotes, func(i, j int) bool {
 		a, b := comparison.Quotes[i], comparison.Quotes[j]
-		if a.AmountCents == nil {
-			return b.AmountCents == nil && a.ProviderID < b.ProviderID
+		aPriced, bPriced := a.Fare != nil && a.Status != "expired", b.Fare != nil && b.Status != "expired"
+		if aPriced != bPriced {
+			return aPriced
 		}
-		if b.AmountCents == nil {
-			return true
+		if aPriced && a.Fare.MinFare != b.Fare.MinFare {
+			return a.Fare.MinFare < b.Fare.MinFare
 		}
-		if *a.AmountCents == *b.AmountCents {
+		if a.ProviderID != b.ProviderID {
 			return a.ProviderID < b.ProviderID
 		}
-		return *a.AmountCents < *b.AmountCents
+		return a.ProductID < b.ProductID
 	})
 	return comparison
+}
+
+func (s *Service) callProvider(ctx context.Context, p Provider, trip Trip) []Quote {
+	start := time.Now()
+	var quotes []Quote
+	var err error
+	select {
+	case <-ctx.Done():
+		err = ctx.Err()
+	case s.slots <- struct{}{}:
+		if err = ctx.Err(); err == nil {
+			quotes, err = p.Estimate(ctx, trip)
+		}
+		<-s.slots
+	}
+	result, invalid := normalizeQuotes(p, trip, quotes, err, time.Now().UTC())
+	logProvider(ctx, s.logger, "provider.result", p.ID(), "not_applicable", start, result, err, "invalid_products", invalid)
+	return result
+}
+
+func normalizeQuotes(p Provider, trip Trip, quotes []Quote, err error, now time.Time) ([]Quote, int) {
+	result := make([]Quote, 0, len(quotes))
+	seen := make(map[string]bool)
+	invalid := 0
+	for _, q := range cloneQuotes(quotes) {
+		if (q.ProviderID != "" && q.ProviderID != p.ID()) || strings.TrimSpace(q.ProductID) == "" ||
+			strings.TrimSpace(q.ServiceName) == "" || !validProduct(q.ProductType) || q.Currency != "SGD" ||
+			q.Capacity < 1 || q.Capacity > 6 || q.FetchedAt.IsZero() || q.FetchedAt.After(now.Add(time.Second)) ||
+			!q.ExpiresAt.After(q.FetchedAt) || seen[q.ProductID] ||
+			!validSource(q.Source) {
+			invalid++
+			continue
+		}
+		q.ProviderID, q.ProviderName = p.ID(), p.Name()
+		if q.Fare != nil {
+			q.Fare.IsEstimateRange = q.Fare.MinFare != q.Fare.MaxFare
+			if !validFare(q.Fare) {
+				q.Fare = nil
+				invalid++
+			}
+		}
+		if q.ETAMinutes != nil && (*q.ETAMinutes < 0 || *q.ETAMinutes > 1<<53-1) {
+			q.ETAMinutes = nil
+			invalid++
+		}
+		if q.Status == "unavailable" || q.Capacity < trip.Passengers {
+			q.Status, q.Fare, q.ETAMinutes = "unavailable", nil, nil
+		} else if !q.ExpiresAt.After(now) {
+			q.Status = "expired"
+		} else if q.Fare == nil && q.ETAMinutes == nil {
+			q.Status = "unavailable"
+		} else if q.Fare == nil || q.ETAMinutes == nil {
+			q.Status = "partial"
+		} else {
+			q.Status = "available"
+		}
+		seen[q.ProductID] = true
+		result = append(result, q)
+	}
+	if len(result) == 0 {
+		message := "This provider has no usable quote. Please try again later."
+		if errors.Is(err, context.DeadlineExceeded) {
+			message = "This provider could not complete within the time limit."
+		}
+		if errors.Is(err, context.Canceled) {
+			message = "This comparison was canceled."
+		}
+		capacity := 4
+		if trip.RideType == "six" {
+			capacity = 6
+		}
+		result = append(result, Quote{ProviderID: p.ID(), ProviderName: p.Name(), ProductID: "unavailable", ProductType: ProductStandard,
+			ServiceName: "No quote available", Status: "unavailable", Currency: "SGD", Source: "unknown", Capacity: capacity,
+			FetchedAt: now, ExpiresAt: now.Add(30 * time.Second), Message: message})
+	}
+	return result, invalid
 }

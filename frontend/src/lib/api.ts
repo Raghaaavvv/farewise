@@ -1,10 +1,17 @@
-export type Location = {
-  id: string;
-  name: string;
-  detail: string;
-  latitude: number;
-  longitude: number;
-};
+import {
+  isRecord,
+  parseComparison,
+  parseCurrentLocation,
+  parseLocations,
+} from "./contracts";
+import type { FareRange } from "./contracts";
+export type {
+  Location,
+  ProductType,
+  FareRange,
+  Quote,
+  Comparison,
+} from "./contracts";
 
 export type TripRequest = {
   pickupId: string;
@@ -22,38 +29,6 @@ export type DeviceCoordinates = {
   accuracyMeters?: number;
 };
 
-export type Quote = {
-  providerId: string;
-  providerName: string;
-  serviceName: string;
-  status: "available" | "unavailable";
-  currency: string;
-  amountCents: number | null;
-  etaMinutes: number | null;
-  source: string;
-  collectedAt: string;
-  cached: boolean;
-  capacity: number;
-  message: string;
-  feesDescription: string;
-};
-
-export type Comparison = {
-  mode: "demo";
-  notice: string;
-  trip: {
-    pickup: Location;
-    dropoff: Location;
-    passengers: number;
-    rideType: string;
-    scenario: string;
-    distanceKm: number;
-  };
-  quotes: Quote[];
-  collectedAt: string;
-  expiresAt: string;
-};
-
 export const initialTrip: TripRequest = {
   pickupId: "changi-t3",
   dropoffId: "orchard",
@@ -62,9 +37,13 @@ export const initialTrip: TripRequest = {
   scenario: "normal",
 };
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function request<T>(
+  path: string,
+  parse: (value: unknown) => T,
+  init: RequestInit = {},
+): Promise<T> {
   const response = await fetch(path, { ...init, cache: "no-store" });
-  let body;
+  let body: unknown;
   try {
     body = await response.json();
   } catch {
@@ -74,32 +53,31 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   if (!response.ok)
     throw new Error(
-      body.error ?? "The comparison service is unavailable. Please try again.",
+      isRecord(body) && typeof body.error === "string"
+        ? body.error
+        : "The comparison service is unavailable. Please try again.",
     );
-  return body as T;
+  return parse(body);
 }
 
 export function fetchLocations(signal?: AbortSignal) {
-  return request<{ locations: Location[] }>("/api/locations", { signal });
+  return request("/api/locations", parseLocations, { signal });
 }
 
 export function resolveCurrentLocation(
   coordinates: DeviceCoordinates,
   signal?: AbortSignal,
 ) {
-  return request<{ location: Location; source: "device"; persisted: false }>(
-    "/api/locations/current",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(coordinates),
-      signal,
-    },
-  );
+  return request("/api/locations/current", parseCurrentLocation, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(coordinates),
+    signal,
+  });
 }
 
 export function compareTrip(trip: TripRequest, signal?: AbortSignal) {
-  return request<Comparison>("/api/compare", {
+  return request("/api/compare", parseComparison, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(trip),
@@ -113,4 +91,11 @@ export function money(cents: number) {
     currency: "SGD",
     currencyDisplay: "narrowSymbol",
   }).format(cents / 100);
+}
+
+export function fareLabel(fare: FareRange | null): string {
+  if (!fare) return "—";
+  return fare.isEstimateRange
+    ? `${money(fare.minFare)} – ${money(fare.maxFare)}`
+    : money(fare.minFare);
 }

@@ -8,13 +8,15 @@ Farewise started with a familiar problem: after landing at the airport, finding 
 
 The current prototype demonstrates the complete frontend-to-backend comparison flow using simulated providers. **Every fare, pickup estimate and availability result is invented. No provider servers are contacted, and the app cannot book rides.** A working comparison interface does not yet mean that live fare access has been solved.
 
-![Farewise desktop prototype showing simulated ride options](docs/images/desktop.jpg)
+![Farewise prototype showing simulated products, ranges and partial data](docs/images/products.png)
 
-[View the iPhone layout](docs/images/iphone.jpg)
+[View the iPhone layout](docs/images/products-iphone.png)
 
 ## What works today
 
 - Compare four configured demo providers: Grab, Gojek, CDG Zig and Ryde.
+- Receive multiple products from one provider, with standard, premium, pool and taxi categories; filter categories without making another request.
+- Display exact fares or min/max ranges, preserve useful partial data, and show each product's expiry independently.
 - Choose pickup and destination from nine sample Singapore locations, or swap them.
 - Use **Use current location** to request browser permission, validate the device coordinates through the Go API, and select them as the pickup. Swapping the route preserves the coordinates.
 - Select one to six passengers and standard or six-seater vehicles. More than four passengers automatically selects a six-seater.
@@ -23,9 +25,10 @@ The current prototype demonstrates the complete frontend-to-backend comparison f
 - See loading states, validation errors, retry controls, quote details and expiration notices.
 - Keep healthy results visible when one provider is unavailable or times out.
 - Protect each demo provider with a token bucket, a 30-second success cache, shared in-progress lookups and bounded retries.
+- Bound provider evaluations across simultaneous comparisons, validate API responses at runtime, and emit structured provider logs.
 - Use a responsive interface on desktop or iPhone.
 
-Prices are deterministic for the same inputs. Refreshing within the 30-second cache window reuses successful quotes and their original timestamps; after cache expiry, fresh demo calculations get new timestamps. Demo quotes have a two-minute display lifetime that cache hits do not extend. All vehicles and service labels are illustrative, rather than verified provider products.
+Prices are deterministic for the same inputs. Refreshing within the cache window reuses complete successful product batches and their original timestamps; cache entries expire after at most 30 seconds, or sooner when any product expires. Demo product lifetimes intentionally vary from 40 to 120 seconds. The rainy-day Gojek demo omits its pickup ETA to exercise partial data. All vehicles, tiers and service labels are illustrative, rather than verified provider products.
 
 ## Languages, frameworks and tools
 
@@ -55,7 +58,7 @@ flowchart TD
     D --> E[Go HTTP handler: decode and validate]
     E --> F[Resolve sample locations and calculate demo distance]
     F --> G[Comparison service]
-    G --> H[Provider interface]
+    G --> H[Bounded workers and shared provider semaphore]
     H --> U[Independent protection wrapper for each provider]
     U --> V[Success cache and shared in-progress lookup]
     V -->|Cache miss| W[Token bucket and cooldown before every attempt]
@@ -66,7 +69,7 @@ flowchart TD
     V -->|Cache hit| M
     W --> X[Transient HTTP error: bounded retries and Retry-After]
     X --> W
-    I --> M[Collect results with per-provider deadlines]
+    I --> M[Collect products within comparison deadline]
     J --> M
     K --> M
     L --> M
@@ -79,7 +82,9 @@ flowchart TD
     T --> B
 ```
 
-The adapters run concurrently using goroutines. Each has an independent five-second total budget, including queueing, cooldowns, backoff and adapter execution, so a slow or failed adapter produces an unavailable result while the others remain usable. Real adapters will need to honor cancellation in their HTTP requests; an aggregation deadline alone cannot stop an implementation that ignores its context.
+The service starts at most four workers per comparison and uses a shared semaphore to permit at most four simultaneous `Provider.Estimate` evaluations across all comparisons on that service instance. A five-second total comparison budget includes worker queueing, semaphore waits, cooldowns, retries and adapter execution. A canceled queue does not start more provider calls; completed healthy products remain in the result.
+
+Provider calls run directly in the workers: a permit is released only when the adapter actually exits. There is no detached goroutine that merely hides a continuing request after timeout. Adapters must honor their context internally; Go cannot forcibly terminate an arbitrary implementation that ignores it. Demo latency uses a timer selected against `ctx.Done()`, and tests exercise actual HTTP request cancellation with `http.NewRequestWithContext`, including cancellation observed by the fake server. `WithMaxConcurrentProviders(n)` configures the service limit; limits are local to that instance/process.
 
 ### How buttons reach the backend
 
@@ -92,6 +97,7 @@ The adapters run concurrently using goroutines. Each has an independent five-sec
 | **Refresh comparison** or **Retry** | Calls the same comparison function with current form values; successful quotes are reused during the 30-second backend cache window |
 | Change route, passengers, ride type or scenario | Updates local state; previous results remain visible with a notice until comparison is requested again |
 | Change sort order | Reorders the existing response in the browser; does not make another provider request |
+| Change vehicle category | Filters already-returned products; does not make another provider request |
 | Open quote details | Displays a dialog using fields already returned by the backend |
 
 `AbortController` cancels superseded browser requests. The UI only processes a completion if its controller has not been aborted, preventing a previous trip's response from replacing a newer comparison. Canceling a browser request does not guarantee that an upstream request has already been stopped.
@@ -110,7 +116,8 @@ Go uses **structs, methods and interfaces** rather than Java-style classes and i
 | `Request` | Pickup/destination IDs, passenger count, vehicle type and demo scenario |
 | `Coordinates` | Optional device latitude, longitude and accuracy; missing coordinate fields are distinct from valid zero values |
 | `Trip` | Resolved location objects, passenger count, vehicle type, scenario and demo distance |
-| `Quote` | Provider identity, service, status, currency, fare, ETA, source, timestamp and capacity |
+| `Quote` | Provider and product identity, category, status, currency, optional fare range and ETA, source, fetched/expiry timestamps and capacity |
+| `FareRange` | `MinFare` and `MaxFare` in integer cents; equal bounds are a point fare, different bounds are a range |
 | `Comparison` | Trip, collection of quotes, demo notice, collection time and expiry |
 | `Service` | Encapsulates the injected providers and their timeout; coordinates comparison |
 | `DemoProvider` | Holds a provider's demo configuration and implements estimation behavior |
@@ -118,7 +125,7 @@ Go uses **structs, methods and interfaces** rather than Java-style classes and i
 | `ProviderPolicy` | Configures request budgets, cache bounds and retry attempts for one provider |
 | `ProviderHTTPError` | Carries an HTTP status and `Retry-After` from an adapter to the retry layer |
 
-Prices use **integer cents** to avoid binary floating-point arithmetic for money. Optional amounts and ETAs use pointers in Go and `number | null` in TypeScript. A missing quote is represented as `null`, never as a zero-dollar ride.
+Prices use **integer cents** to avoid binary floating-point arithmetic for money. Optional fares and ETAs use pointers in Go and nullable fields in TypeScript. A missing fare is `null`; an explicitly supplied zero-price fare remains distinct and valid. Prices and ETAs must fit JavaScript's safe-integer range.
 
 ### Provider abstraction and dependency injection
 
@@ -126,11 +133,17 @@ Prices use **integer cents** to avoid binary floating-point arithmetic for money
 type Provider interface {
     ID() string
     Name() string
-    Estimate(context.Context, Trip) (Quote, error)
+    Estimate(context.Context, Trip) ([]Quote, error)
 }
 ```
 
-The current application creates **four differently configured instances of one `DemoProvider` type**. They implement this interface and return a shared `Quote` shape. They simulate fetching details; they do not fetch real app data.
+The current application creates **four differently configured instances of one `DemoProvider` type**. They implement this interface and return batches of the shared `Quote` shape. Grab adds an illustrative premium tier, Zig adds an illustrative taxi range, and Ryde adds a pool tier for one or two passengers in a standard vehicle. These examples simulate fetching details; they do not fetch real app data.
+
+A stable `(providerId, productId)` pair identifies each product. `ProductType` is a broad category, not a unique ID. A batch may contain healthy products alongside partial products, and a nonempty batch with an error preserves usable entries rather than automatically retrying the whole request. Malformed metadata and duplicate product IDs are discarded; an invalid fare or ETA can be removed while preserving the other useful field. If nothing usable remains, the provider gets an unavailable entry. `available` means fare and ETA are present, `partial` means one is missing, `unavailable` means neither can be used, and `expired` means that product's lifetime has elapsed.
+
+`FetchedAt` is when a quote was obtained, and `ExpiresAt` is its individual validity limit. The comparison retains `collectedAt` as the oldest priced product's fetched time and `expiresAt` as the earliest expiry among priced products, including a product that expired while another adapter was running. That overall refresh hint does not invalidate longer-lived siblings: the UI checks every quote independently and removes expired quotes from recommendations. Neither cache hits nor another comparison extend a product's lifetime.
+
+These contracts also fit a future historical-data model: `source: "model"`, product-specific ranges, and an explicit prediction lifetime. `isEstimateRange` describes unequal bounds; it does not claim a statistically calibrated confidence interval. Model versioning, feature provenance and calibration remain future work.
 
 `main.go` wraps each demo instance using `NewProtectedProvider(provider, policy)` before injecting the wrapped list into `NewService(providers, timeout)`. Both the wrapper and underlying adapter implement `Provider`: this is the **decorator pattern through composition**. The service knows the interface rather than depending on the concrete implementation. Tests can therefore substitute a slow fake or a test-only HTTP adapter. A future permitted integration can implement the same interface with provider-specific authentication, requests and response normalization.
 
@@ -146,7 +159,19 @@ This uses composition and an adapter-style boundary. It does not currently conta
 - **Frontend API client:** typed transport functions and error propagation.
 - **UI layer:** interaction, loading states, sorting, dialogs and responsive presentation.
 
-Other skills exercised include REST API design, JSON serialization, React hooks, dependency injection, race-aware concurrent programming, request cancellation, Git workflows and continuous integration. The TypeScript types describe the expected API contract; the client currently does not perform runtime schema validation of arbitrary responses.
+Other skills exercised include REST API design, JSON serialization, React hooks, dependency injection, race-aware concurrent programming, request cancellation, Git workflows and continuous integration.
+
+### Runtime validation at the frontend boundary
+
+`src/lib/contracts.ts` parses unknown JSON into narrowly validated UI types before state is updated. No success response is accepted merely through a TypeScript assertion. The parser checks all consumed fields, nullable fares/ETAs, safe integer cents, finite coordinate ranges, recognized categories/statuses/sources, duplicate provider-product IDs, status consistency and RFC 3339 timestamp ordering. Additive unknown fields are ignored; required values are not coerced. Location catalog and current-location responses are validated too.
+
+A malformed HTTP 200 produces an actionable invalid-response error. Malformed error bodies and non-JSON responses produce the existing unavailable-service message. The client never renders an arbitrary error object. UI helpers filter categories, handle expired products and sort ranges by their lower bound; a lowest-fare badge appears only when a product's entire range is strictly below every other fresh price in the selected category. Overlapping ranges, ties and the all-category view have no winner badge.
+
+### Structured observability
+
+The executable configures `slog` with a JSON handler on stderr. `provider.attempt` records each actual underlying attempt, `provider.lookup` records cache hit/miss/coalescing and total lookup latency, and `provider.result` records normalized results and invalid product counts. Fields include provider ID, duration in milliseconds, outcome, product count, error category and HTTP status when available. Logging dependencies can be injected with `WithProviderLogger` and `WithServiceLogger` for tests.
+
+Logs omit coordinates, route IDs, cache fingerprints, credentials and arbitrary adapter error text or response bodies. Failure categories distinguish cancellation, deadlines, capacity rejection, HTTP errors and other adapter failures. These are structured logs, not a deployed metrics/tracing system.
 
 ## Coordinates and the Haversine calculation
 
@@ -183,13 +208,16 @@ The map graphic is decorative, not a navigable map.
 | Missing or invalid device coordinates, negative accuracy, or coordinates attached to a conflicting catalog ID | HTTP 400; current-location comparisons require their coordinate payload |
 | Location permission denied, lookup unavailable or timed out | Actionable message; the previous pickup is preserved and manual selection remains available |
 | Location requested from an insecure origin or unsupported browser | No device lookup is started; the UI explains the manual fallback |
-| Provider returns an error, times out or returns missing/invalid fare fields | An unavailable quote is returned; healthy provider quotes are preserved |
+| Provider returns several products or a partial response | Healthy products and useful partial fields are preserved; a whole-provider unavailable entry is used only when no valid product remains |
+| Product has an invalid range or negative ETA | That field is removed; a usable sibling field can remain as partial data |
+| Provider times out or is canceled | Context-aware adapter exits, its semaphore permit is released, and queued canceled calls do not start |
 | API returns an error | Frontend displays the message and a retry control |
 | API response cannot be parsed as JSON | Frontend displays a service-unavailable message |
+| Successful HTTP response violates the runtime contract | Frontend shows an invalid-response error before updating UI state |
 | Network failure | The frontend catches the rejected request and displays an error |
 | Old request completes after a new request starts | Aborted request completions are ignored by the UI |
 | Trip changes after comparison | Results remain associated with the previous submitted trip and an update notice appears |
-| Demo expiry passes | UI marks the quotes expired and offers refresh; the backend does not enforce expiry at booking because booking is not implemented |
+| One product expires | Its card is marked expired and excluded from recommendations; later-expiring products remain usable |
 
 The backend limits comparison bodies to 4 KB, applies server read/write timeouts, sends `Cache-Control: no-store`, and supports graceful shutdown. HTTP `no-store` prevents browser/proxy caching; it does not disable the explicit internal provider cache. Unavailable results are sorted after available prices. The outbound per-provider limits do not provide inbound abuse protection, authentication or production monitoring.
 
@@ -199,7 +227,7 @@ The Go tests cover:
 
 | Test | What it checks |
 | --- | --- |
-| `TestComparePartialFailureAndOrdering` | A failing Ryde adapter leaves all four result entries present, available fares stay sorted, and the missing fare remains null |
+| `TestComparePartialFailureAndOrdering` | A failing Ryde adapter leaves all four providers represented, healthy products stay sorted, and the missing fare remains null |
 | `TestInvalidTrips` | Rejects identical locations, five passengers in a standard vehicle, unknown locations, unexpected fields and multiple JSON objects |
 | `TestTimeoutKeepsOtherProviderResult` | A timed-out provider does not discard a healthy provider's quote |
 | `TestHaversineDistance` | Identical points give zero distance, one degree along the equator gives approximately 111.195 km, and distance is symmetric |
@@ -215,6 +243,11 @@ The Go tests cover:
 | `TestCacheKeysTTLAndCopies` / `TestCacheCapacityAndInvalidResults` | Route direction, precise coordinates, passengers, vehicle and scenario distinguish keys; expiry, LRU bounds and defensive quote copies work; invalid results are not cached |
 | `TestConcurrentComparisonsCoalesceAndWaiterCanCancel` / `TestFlightCapacityAndLeaderCancellation` | Concurrent identical trips use one adapter call; cancellation and queue capacity work without keeping failed flights |
 | `TestCachedComparisonKeepsOriginalFreshness` / `TestFreshThenCachedComparisonHasIdenticalExpiry` | Cached results keep their collection time and cannot extend the display expiry, including the very first refresh |
+| `TestHTTPProviderCancellationReachesServer` | Parent cancellation and service deadline both cancel a real HTTP request; the fake server observes cancellation and the semaphore permit is freed |
+| `TestConcurrencyLimitAcrossComparisons` / `TestCanceledQueueDoesNotStartMoreProviders` | Twelve providers across two simultaneous comparisons never exceed the configured global limit; canceled queued jobs do not call adapters |
+| `TestMultipleProductsPartialDataAndErrors` / `TestQuoteNormalizationPreservesSiblings` | Multi-product responses, partial fields, partial errors, range normalization and malformed siblings do not discard healthy products |
+| `TestBundleCacheHonorsShortestProductTTLAndCopies` | Whole-batch cache expires no later than the shortest product lifetime and copies nested fare/ETA values |
+| `TestStructuredProviderLogs` | Logs contain latency, outcome and cache fields without adapter secrets or route data |
 
 Run all local checks:
 
@@ -224,9 +257,9 @@ bash scripts/check.sh
 
 This runs Go tests with the race detector, `go vet`, frontend location/API unit tests, TypeScript checks and a production Next.js build. GitHub Actions runs the equivalent checks on pushes and pull requests. The Go workflow checks both the supported minimum version and the current development version.
 
-The eight frontend tests use synthetic positions and injected geolocation behavior to cover permission success, denial, unavailable positioning, timeout, insecure origins, unsupported browsers, coordinate POST requests and backend validation errors. Run them with `pnpm test` from `frontend/`. They do not read anyone's real location or display a real permission prompt.
+The 21 frontend tests cover synthetic geolocation and coordinate requests, runtime response validation (including malformed successful responses), category filtering, product identity, missing ETAs, range display, overlapping ranges and per-product expiry. Run them with `pnpm test` from `frontend/`. They do not read anyone's real location or display a real permission prompt.
 
-TypeScript checking and a production build are static/build checks, not frontend behavioral tests. Sorting, the quote dialog, six-seater selection, provider-failure display and a 390-pixel mobile layout were also checked manually in the browser. Browser automation tests are a future improvement.
+TypeScript checking and a production build are static/build checks. Domain helpers and API boundaries have behavioral unit tests, but a repeatable full browser suite remains a future improvement. Category filtering, multiple products, partial ETA display and product expiry were also checked in the local browser, along with a 390-pixel iPhone layout with no horizontal overflow. The screenshots show synthetic demo data in the all-category desktop view and premium iPhone view.
 
 ## Challenges and problems identified so far
 
@@ -255,18 +288,18 @@ A timeout limits how long a request takes; it does **not** limit how often reque
 | Setting | Demo default and behavior |
 | --- | --- |
 | Token bucket | 2 attempts/second, burst of 2; every attempt, including retries, needs a token |
-| Success cache | 30 seconds from successful completion; available, valid quotes only |
+| Success cache | Complete, valid available batches only; expires at the earlier of 30 seconds from completion or the shortest product expiry; partial/error batches are not cached |
 | Cache key | Directional route IDs and precise coordinates, passenger count, vehicle type, plus scenario and distance because they affect demo prices; each provider has its own namespace |
 | Memory bounds | 256 entries per provider with least-recently-used eviction; expired entries are removed on subsequent lookups; no disk persistence |
 | Duplicate suppression | Concurrent callers for the same key share one in-progress lookup rather than spending separate tokens |
 | Request capacity | At most 64 distinct in-progress cache misses per provider, including queued calls and retries; excess requests return an unavailable result |
-| Retry budget | At most 3 attempts total; only typed HTTP 429, 502, 503 and 504 errors are retryable; unclassified errors and permanent statuses are returned immediately |
+| Retry budget | At most 3 attempts total for an empty failed batch; only typed HTTP 429, 502, 503 and 504 errors are retryable; nonempty partial/error batches are preserved without retrying |
 | Backoff | Capped exponential delay of 200 ms, 400 ms, then up to 1 second, with equal jitter between half and all of each delay; three attempts require at most two retry waits |
 | `Retry-After` | Integer seconds or HTTP-date; wait for at least the greater of the header delay and jittered backoff; malformed headers fall back to backoff |
 | Shared cooldown | A 429, or a retryable error carrying `Retry-After`, pauses new attempts for that provider, including different routes; already-started calls cannot be recalled |
 | Cancellation | Token waits, retry waits and coalesced waits honor context cancellation; the comparison's five-second budget includes all waits |
 
-`Retry-After` is **never shortened to the backoff cap**. A provider asking for a 60-second pause causes a five-second comparison to time out rather than retry early, while the provider-wide cooldown stays in effect. A cache hit spends no token, can be served during cooldown, and preserves the quote's original `collectedAt`; the response's `cached` field identifies actual cache reuse. Sharing an in-progress result is not marked as a cache hit.
+`Retry-After` is **never shortened to the backoff cap**. A provider asking for a 60-second pause causes a five-second comparison to time out rather than retry early, while the provider-wide cooldown stays in effect. A cache hit spends no token, can be served during cooldown, and preserves each quote's original `fetchedAt` and `expiresAt`; the response's `cached` field identifies actual cache reuse. Sharing an in-progress result is not marked as a cache hit.
 
 Read the implementation in this order: `DemoProviderPolicy` and wiring in `cmd/server/main.go`; `ProtectedProvider.Estimate` for caching and coalescing; `waitForToken` for budget/cooldown; `estimate` for retry orchestration; `ProviderHTTPError` and `ParseRetryAfter` for the future HTTP adapter contract. The test-only HTTP adapter closes response bodies and uses a context-aware request against `httptest`, never a real ride service.
 
@@ -359,7 +392,18 @@ Example comparison request:
 }
 ```
 
-`rideType` accepts `standard` or `six`; `scenario` accepts `normal`, `busy`, `rain` or `outage`. Invalid inputs return HTTP 400 with an `error` field. Valid comparisons return HTTP 200, including partial failures represented as unavailable quote entries with null fare and ETA.
+`rideType` accepts `standard` or `six`; `scenario` accepts `normal`, `busy`, `rain` or `outage`. Invalid inputs return HTTP 400 with an `error` field. Valid comparisons return HTTP 200 with a flat array containing potentially multiple products per provider. Partial products have a nullable fare or ETA; unavailable products have both null.
+
+The internal API now replaces `amountCents` with `fare` and quote-level `collectedAt` with `fetchedAt`/`expiresAt`. Frontend and backend must be updated together. Example fare shapes in cents:
+
+```json
+{
+  "pointFare": { "minFare": 1800, "maxFare": 1800, "isEstimateRange": false },
+  "rangeFare": { "minFare": 2200, "maxFare": 2600, "isEstimateRange": true }
+}
+```
+
+These two illustrative shapes show the value of a quote's `fare` property, not extra top-level response fields. Each quote also includes `productId`, `productType`, `fetchedAt` and `expiresAt`; the comparison's own timestamps remain separate.
 
 For a device pickup, use `pickupId: "current-location"` and add `pickupCoordinates: { "latitude": 1.36, "longitude": 103.989, "accuracyMeters": 12 }`. These example values are synthetic. After swapping, the device point uses `dropoffId: "current-location"` and `dropoffCoordinates` instead. Accuracy is optional; latitude and longitude are required. Never attach coordinates to a catalog ID.
 
@@ -373,9 +417,11 @@ backend/
 frontend/
   src/app/                    Next.js page, layout and responsive styles
   src/components/             Icons and illustrative route graphic
-  src/lib/api.ts              TypeScript contracts and transport functions
+  src/lib/api.ts              Validated transport functions and fare formatting
+  src/lib/contracts.ts        Response types and narrow runtime parsers
+  src/lib/quote-view.ts       Category, ordering, range and expiry helpers
   src/lib/geolocation.ts      Browser permission and location-error handling
-  tests/                      Synthetic geolocation and coordinate API unit tests
+  tests/                      Geolocation, API contract and quote behavior tests
   next.config.ts              Same-origin proxy and watcher configuration
 .github/workflows/ci.yml      Automated checks on GitHub
 .vscode/                     Recommended extensions, tasks and debugger
@@ -388,12 +434,15 @@ Farewise.code-workspace      Portable VS Code workspace
 
 - [ ] Confirm permitted passenger-fare access and comparison-use rights for each provider.
 - [ ] Implement a live adapter, beginning with one provider, and validate it against actual app quotes.
-- [ ] Expand the quote contract to support ranges, real fee inclusions, provider expiry and source provenance.
+- [x] Support batches, stable product IDs, fare ranges, partial fields and per-product expiry.
+- [ ] Map actual provider fee inclusions and product names; add model/feature version provenance.
 - [x] Add optional device geolocation with permission, validation, cancellation and manual fallback.
 - [ ] Add manual address search, geocoding and actual road routing.
 - [x] Implement provider-specific rate limiting, bounded retries and a bounded short-TTL demo cache; test 429 behavior with a fake HTTP server.
 - [ ] Evaluate a calibrated algorithmic estimate provider, clearly separated from live quotes and demo prices.
-- [ ] Add browser interaction tests and runtime API response validation.
+- [x] Bound provider concurrency and prove context cancellation with a real fake-server HTTP call.
+- [x] Add runtime API response validation and structured provider logs.
+- [ ] Add full browser interaction tests.
 - [ ] Add deployment configuration, authentication where needed and operational monitoring.
 
 Farewise is a personal learning project and is not affiliated with Grab, Gojek, CDG Zig or Ryde. The repository contains a prototype, not a production ride-booking service.

@@ -5,6 +5,7 @@ import type { FormEvent } from "react";
 import {
   compareTrip,
   fetchLocations,
+  fareLabel,
   initialTrip,
   money,
   resolveCurrentLocation,
@@ -17,6 +18,14 @@ import type {
   TripRequest,
 } from "@/lib/api";
 import { getDeviceCoordinates } from "@/lib/geolocation";
+import {
+  lowestQuote,
+  priced,
+  quoteExpired,
+  quoteKey,
+  sortedQuotes,
+} from "@/lib/quote-view";
+import type { ProductFilter } from "@/lib/quote-view";
 import { Icon } from "@/components/icon";
 import { RoutePreview } from "@/components/route-preview";
 
@@ -48,6 +57,7 @@ export default function Home() {
   const locationAttempt = useRef(0);
   const activeLocation = useRef<AbortController | null>(null);
   const [sort, setSort] = useState("price");
+  const [product, setProduct] = useState<ProductFilter>("standard");
   const [detail, setDetail] = useState<Quote | "about" | null>(null);
   const [now, setNow] = useState(0);
   const activeRequest = useRef<AbortController | null>(null);
@@ -76,7 +86,7 @@ export default function Home() {
       }
     }
     void init();
-    const tick = setInterval(() => setNow(Date.now()), 15000);
+    const tick = setInterval(() => setNow(Date.now()), 1000);
     return () => {
       activeRequest.current?.abort();
       activeLocation.current?.abort();
@@ -179,27 +189,19 @@ export default function Home() {
   const dirty =
     comparedTrip !== null &&
     JSON.stringify(trip) !== JSON.stringify(comparedTrip);
-  const expired = comparison !== null && now > Date.parse(comparison.expiresAt);
+  const expired =
+    comparison !== null && now >= Date.parse(comparison.expiresAt);
   const quotes = useMemo(
-    () =>
-      [...(comparison?.quotes ?? [])].sort((a, b) => {
-        if (a.status !== b.status) return a.status === "available" ? -1 : 1;
-        const field = sort === "eta" ? "etaMinutes" : "amountCents";
-        return (a[field] ?? Infinity) - (b[field] ?? Infinity);
-      }),
-    [comparison, sort],
+    () => sortedQuotes(comparison?.quotes ?? [], product, sort, now),
+    [comparison, product, sort, now],
   );
-  const available =
-    comparison?.quotes.filter(
-      (q) => q.status === "available" && q.amountCents !== null,
-    ) ?? [];
-  const cheapest = available.length
-    ? available.reduce((a, b) => (a.amountCents! < b.amountCents! ? a : b))
-    : null;
+  const available = quotes.filter((q) => priced(q, now));
+  const cheapest = lowestQuote(quotes, product, now);
+  const hasRanges = available.some((q) => q.fare!.isEstimateRange);
   const savings =
-    available.length > 1
-      ? Math.max(...available.map((q) => q.amountCents!)) -
-        cheapest!.amountCents!
+    cheapest && !hasRanges && available.length > 1
+      ? Math.max(...available.map((q) => q.fare!.maxFare)) -
+        cheapest.fare!.minFare
       : 0;
   const invalid = trip.pickupId === trip.dropoffId;
   const changePassengers = (value: number) =>
@@ -476,17 +478,43 @@ export default function Home() {
                 <div className="eyebrow small">02 / YOUR OPTIONS</div>
                 <h2 id="results-title">Find your kind of ride.</h2>
               </div>
-              <label className="sort-control">
-                <span>Sort by</span>
-                <select
-                  aria-label="Sort rides"
-                  value={sort}
-                  onChange={(e) => setSort(e.target.value)}
-                >
-                  <option value="price">Lowest price</option>
-                  <option value="eta">Soonest pickup</option>
-                </select>
-              </label>
+              <div className="results-controls">
+                <label className="sort-control">
+                  <span>Category</span>
+                  <select
+                    aria-label="Vehicle category"
+                    value={product}
+                    onChange={(e) => {
+                      const selected = e.target.value;
+                      if (
+                        selected === "all" ||
+                        selected === "standard" ||
+                        selected === "premium" ||
+                        selected === "pool" ||
+                        selected === "taxi"
+                      )
+                        setProduct(selected);
+                    }}
+                  >
+                    <option value="standard">Standard</option>
+                    <option value="premium">Premium</option>
+                    <option value="pool">Shared ride</option>
+                    <option value="taxi">Taxi</option>
+                    <option value="all">All categories</option>
+                  </select>
+                </label>
+                <label className="sort-control">
+                  <span>Sort by</span>
+                  <select
+                    aria-label="Sort rides"
+                    value={sort}
+                    onChange={(e) => setSort(e.target.value)}
+                  >
+                    <option value="price">Lowest starting fare</option>
+                    <option value="eta">Soonest pickup</option>
+                  </select>
+                </label>
+              </div>
             </div>
 
             <div className="scenario-bar">
@@ -530,14 +558,14 @@ export default function Home() {
                 {loading
                   ? "Finding your demo options…"
                   : comparison
-                    ? `${available.length} options · ${comparison.trip.rideType === "six" ? "6-seater" : "standard"} · SGD`
+                    ? `${available.length} ${available.length === 1 ? "option" : "options"} · ${comparison.trip.rideType === "six" ? "6-seater" : "4-seater"} · SGD`
                     : "Your options will appear here"}
               </span>
               {comparison && !loading && (
                 <span className={expired ? "expired" : "fresh"}>
                   <span className="status-dot" />
                   {expired
-                    ? "Demo quotes expired · refresh to update"
+                    ? "Some quotes expired · refresh to update"
                     : `Generated ${new Date(comparison.collectedAt).toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit" })}`}
                 </span>
               )}
@@ -553,11 +581,15 @@ export default function Home() {
                     </div>
                   ))
                 : quotes.map((quote) => {
-                    const best = quote.providerId === cheapest?.providerId;
-                    const unavailable = quote.status !== "available";
+                    const best =
+                      cheapest !== null &&
+                      quoteKey(quote) === quoteKey(cheapest);
+                    const isExpired = quoteExpired(quote, now);
+                    const unavailable =
+                      quote.status === "unavailable" || isExpired;
                     return (
                       <article
-                        key={quote.providerId}
+                        key={quoteKey(quote)}
                         className={`quote-card ${best ? "best" : ""} ${unavailable ? "unavailable" : ""}`}
                       >
                         <div
@@ -577,30 +609,47 @@ export default function Home() {
                               </span>
                             )}
                           </div>
-                          <p>
-                            {unavailable ? quote.message : quote.serviceName}
-                          </p>
+                          <p>{quote.serviceName}</p>
                           {!unavailable && (
                             <span className="pickup-time">
                               <Icon name="clock" size={14} />
-                              {quote.etaMinutes} min pickup <span>·</span> up to{" "}
-                              {quote.capacity} people
+                              {quote.etaMinutes === null
+                                ? "Pickup estimate unavailable"
+                                : `${quote.etaMinutes} min pickup`}{" "}
+                              <span>·</span> up to {quote.capacity} people
                             </span>
                           )}
+                          <span className="quote-validity">
+                            {isExpired
+                              ? "Expired · refresh for a new quote"
+                              : quote.status === "unavailable"
+                                ? quote.message
+                                : `Expires ${new Date(quote.expiresAt).toLocaleTimeString("en-SG")}`}
+                          </span>
                         </div>
                         <div className="quote-price">
-                          <strong>
-                            {quote.amountCents === null
-                              ? "—"
-                              : money(quote.amountCents)}
+                          <strong
+                            className={
+                              quote.fare?.isEstimateRange ? "fare-range" : ""
+                            }
+                          >
+                            {fareLabel(quote.fare)}
                           </strong>
                           <span>
-                            {unavailable ? "Unavailable" : "Simulated total"}
+                            {isExpired
+                              ? "Expired"
+                              : quote.status === "unavailable"
+                                ? "Unavailable"
+                                : quote.fare === null
+                                  ? "Price unavailable"
+                                  : quote.fare.isEstimateRange
+                                    ? "Demo estimate range"
+                                    : "Simulated total"}
                           </span>
                         </div>
                         <button
                           className="detail-button"
-                          aria-label={`View ${quote.providerName} quote details`}
+                          aria-label={`View ${quote.providerName} ${quote.serviceName} quote details`}
                           onClick={() => setDetail(quote)}
                         >
                           <Icon name="chevron" size={19} />
@@ -609,6 +658,19 @@ export default function Home() {
                     );
                   })}
             </div>
+
+            {!loading && comparison && quotes.length === 0 && (
+              <p className="change-banner">
+                No demo options match this category and passenger count.
+              </p>
+            )}
+            {hasRanges && !loading && (
+              <p className="change-banner">
+                These are estimated ranges. Overlapping ranges do not establish
+                which option will cost less. Compare matching vehicle
+                categories.
+              </p>
+            )}
 
             {cheapest && !loading && savings > 0 && (
               <div className="savings-note">
@@ -694,8 +756,9 @@ export default function Home() {
           <>
             <p>
               Choose a route, passenger count and ride type, then compare four
-              illustrative ride options. Switch the demo scenario to explore
-              busy hours, rain or an unavailable provider.
+              illustrative providers. Filter their vehicle categories or switch
+              the demo scenario to explore busy hours, rain or an unavailable
+              provider.
             </p>
             <p>
               Every price, pickup time and availability shown here is invented.
@@ -713,20 +776,20 @@ export default function Home() {
             <>
               <div className="dialog-total">
                 <span>{detail.serviceName || "No quote available"}</span>
-                <strong>
-                  {detail.amountCents === null
-                    ? "Unavailable"
-                    : money(detail.amountCents)}
-                </strong>
+                <strong>{fareLabel(detail.fare)}</strong>
               </div>
               <p>{detail.message}</p>
-              {detail.amountCents !== null && (
+              {detail.fare !== null && (
                 <>
                   <p>{detail.feesDescription}</p>
                   <dl>
                     <div>
                       <dt>Pickup estimate</dt>
-                      <dd>{detail.etaMinutes} minutes · simulated</dd>
+                      <dd>
+                        {detail.etaMinutes === null
+                          ? "Unavailable"
+                          : `${detail.etaMinutes} minutes · simulated`}
+                      </dd>
                     </div>
                     <div>
                       <dt>Passenger capacity</dt>
@@ -735,10 +798,19 @@ export default function Home() {
                     <div>
                       <dt>Generated</dt>
                       <dd>
-                        {new Date(detail.collectedAt).toLocaleTimeString(
-                          "en-SG",
-                        )}
+                        {new Date(detail.fetchedAt).toLocaleTimeString("en-SG")}
                       </dd>
+                    </div>
+                    <div>
+                      <dt>Valid until</dt>
+                      <dd>
+                        {new Date(detail.expiresAt).toLocaleTimeString("en-SG")}
+                        {quoteExpired(detail, now) ? " · expired" : ""}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Vehicle category</dt>
+                      <dd>{detail.productType}</dd>
                     </div>
                   </dl>
                 </>

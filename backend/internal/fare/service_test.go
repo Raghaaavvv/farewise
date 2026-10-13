@@ -10,9 +10,9 @@ type slowProvider struct{}
 
 func (slowProvider) ID() string   { return "slow" }
 func (slowProvider) Name() string { return "Slow demo" }
-func (slowProvider) Estimate(ctx context.Context, trip Trip) (Quote, error) {
+func (slowProvider) Estimate(ctx context.Context, trip Trip) ([]Quote, error) {
 	<-ctx.Done()
-	return Quote{}, ctx.Err()
+	return nil, ctx.Err()
 }
 
 func TestTimeoutKeepsOtherProviderResult(t *testing.T) {

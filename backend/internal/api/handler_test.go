@@ -23,15 +23,19 @@ func TestComparePartialFailureAndOrdering(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &comparison); err != nil {
 		t.Fatal(err)
 	}
-	if comparison.Mode != "demo" || len(comparison.Quotes) != 4 {
+	providers := make(map[string]bool)
+	for _, quote := range comparison.Quotes {
+		providers[quote.ProviderID] = true
+	}
+	if comparison.Mode != "demo" || len(providers) != 4 || len(comparison.Quotes) != 6 {
 		t.Fatal("missing demo flag or provider results")
 	}
-	last := comparison.Quotes[3]
-	if last.ProviderID != "ryde" || last.Status != "unavailable" || last.AmountCents != nil {
+	last := comparison.Quotes[len(comparison.Quotes)-1]
+	if last.ProviderID != "ryde" || last.Status != "unavailable" || last.Fare != nil {
 		t.Fatal("failed provider must not look like a free ride")
 	}
-	for i := 1; i < 3; i++ {
-		if *comparison.Quotes[i-1].AmountCents > *comparison.Quotes[i].AmountCents {
+	for i := 1; i < len(comparison.Quotes)-1; i++ {
+		if comparison.Quotes[i-1].Fare.MinFare > comparison.Quotes[i].Fare.MinFare {
 			t.Fatal("prices are not sorted")
 		}
 	}

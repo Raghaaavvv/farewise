@@ -14,41 +14,45 @@ import (
 
 type functionProvider struct {
 	id string
-	fn func(context.Context, Trip) (Quote, error)
+	fn func(context.Context, Trip) ([]Quote, error)
 }
 
 func (p functionProvider) ID() string   { return p.id }
 func (p functionProvider) Name() string { return p.id }
-func (p functionProvider) Estimate(ctx context.Context, trip Trip) (Quote, error) {
-	return p.fn(ctx, trip)
+func (p functionProvider) Estimate(ctx context.Context, trip Trip) ([]Quote, error) {
+	quotes, err := p.fn(ctx, trip)
+	for i := range quotes {
+		quotes[i].ProviderID, quotes[i].ProviderName = p.ID(), p.Name()
+	}
+	return quotes, err
 }
 
 // A test-only HTTP adapter exercises actual status/header parsing. No real
 // ride-provider endpoint or device location is used by these tests.
 func testHTTPProvider(server *httptest.Server) Provider {
-	return functionProvider{"http-demo", func(ctx context.Context, _ Trip) (Quote, error) {
+	return functionProvider{"http-demo", func(ctx context.Context, _ Trip) ([]Quote, error) {
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
 		if err != nil {
-			return Quote{}, err
+			return nil, err
 		}
 		response, err := server.Client().Do(request)
 		if err != nil {
-			return Quote{}, err
+			return nil, err
 		}
 		defer response.Body.Close()
 		if response.StatusCode != http.StatusOK {
-			return Quote{}, &ProviderHTTPError{response.StatusCode, response.Header.Get("Retry-After")}
+			return nil, &ProviderHTTPError{response.StatusCode, response.Header.Get("Retry-After")}
 		}
-		var quote Quote
-		err = json.NewDecoder(response.Body).Decode(&quote)
-		return quote, err
+		var quotes []Quote
+		err = json.NewDecoder(response.Body).Decode(&quotes)
+		return quotes, err
 	}}
 }
 
 func sampleQuote() Quote {
-	amount, eta := 1800, 4
-	return Quote{ProviderID: "http-demo", ProviderName: "HTTP demo", Status: "available",
-		Currency: "SGD", Source: "simulated", AmountCents: &amount, ETAMinutes: &eta, CollectedAt: time.Now().UTC()}
+	eta, now := 4, time.Now().UTC()
+	return Quote{ProviderID: "http-demo", ProviderName: "HTTP demo", ProductID: "standard", ProductType: ProductStandard, ServiceName: "Standard demo", Status: "available",
+		Currency: "SGD", Source: "simulated", Capacity: 4, Fare: &FareRange{MinFare: 1800, MaxFare: 1800}, ETAMinutes: &eta, FetchedAt: now, ExpiresAt: now.Add(2 * time.Minute)}
 }
 
 func sampleTrip(t *testing.T) Trip {
@@ -86,7 +90,7 @@ func TestHTTP429HonorsRetryAfterThenCachesSuccess(t *testing.T) {
 			w.WriteHeader(http.StatusTooManyRequests)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(sampleQuote())
+		_ = json.NewEncoder(w).Encode([]Quote{sampleQuote()})
 	}))
 	defer server.Close()
 	p := protectedForTest(t, testHTTPProvider(server), fastPolicy())
@@ -103,8 +107,8 @@ func TestHTTP429HonorsRetryAfterThenCachesSuccess(t *testing.T) {
 		t.Fatalf("retried before Retry-After elapsed: %v", elapsed)
 	}
 	second, err := p.Estimate(ctx, trip)
-	if err != nil || calls.Load() != 2 || !second.Cached || first.Cached || !first.CollectedAt.Equal(second.CollectedAt) {
-		t.Fatalf("success should be cached without a third HTTP call: calls=%d, cached=%v, err=%v", calls.Load(), second.Cached, err)
+	if err != nil || calls.Load() != 2 || !second[0].Cached || first[0].Cached || !first[0].FetchedAt.Equal(second[0].FetchedAt) {
+		t.Fatalf("success should be cached without a third HTTP call: calls=%d, cached=%v, err=%v", calls.Load(), second[0].Cached, err)
 	}
 }
 
@@ -191,12 +195,12 @@ func TestTokenBucketBurstRefillAndProviderIsolation(t *testing.T) {
 	var mu sync.Mutex
 	var times []time.Time
 	var calls atomic.Int32
-	provider := functionProvider{"limited", func(context.Context, Trip) (Quote, error) {
+	provider := functionProvider{"limited", func(context.Context, Trip) ([]Quote, error) {
 		calls.Add(1)
 		mu.Lock()
 		times = append(times, time.Now())
 		mu.Unlock()
-		return sampleQuote(), nil
+		return []Quote{sampleQuote()}, nil
 	}}
 	policy := fastPolicy()
 	policy.RequestsPerSecond, policy.Burst = 10, 2
@@ -231,15 +235,15 @@ func TestTokenBucketBurstRefillAndProviderIsolation(t *testing.T) {
 
 func TestCacheKeysTTLAndCopies(t *testing.T) {
 	var calls atomic.Int32
-	p := protectedForTest(t, functionProvider{"cache", func(context.Context, Trip) (Quote, error) {
+	p := protectedForTest(t, functionProvider{"cache", func(context.Context, Trip) ([]Quote, error) {
 		calls.Add(1)
-		return sampleQuote(), nil
+		return []Quote{sampleQuote()}, nil
 	}}, fastPolicy())
 	trip := sampleTrip(t)
 	first, _ := p.Estimate(context.Background(), trip)
-	*first.AmountCents = 1 // Must not mutate the stored quote.
+	first[0].Fare.MinFare = 1 // Must not mutate the stored quote.
 	second, err := p.Estimate(context.Background(), trip)
-	if err != nil || !second.Cached || *second.AmountCents != 1800 || calls.Load() != 1 {
+	if err != nil || !second[0].Cached || second[0].Fare.MinFare != 1800 || calls.Load() != 1 {
 		t.Fatal("cache failed or returned shared mutable pointers")
 	}
 	for _, change := range []func(*Trip){
@@ -254,7 +258,7 @@ func TestCacheKeysTTLAndCopies(t *testing.T) {
 		changed := trip
 		change(&changed)
 		q, err := p.Estimate(context.Background(), changed)
-		if err != nil || q.Cached {
+		if err != nil || q[0].Cached {
 			t.Fatal("changed price input incorrectly reused cache")
 		}
 	}
@@ -267,7 +271,7 @@ func TestCacheKeysTTLAndCopies(t *testing.T) {
 	p.mu.Unlock()
 	before := calls.Load()
 	q, err := p.Estimate(context.Background(), trip)
-	if err != nil || q.Cached || calls.Load() != before+1 {
+	if err != nil || q[0].Cached || calls.Load() != before+1 {
 		t.Fatal("expired entry must fetch again")
 	}
 }
@@ -275,8 +279,8 @@ func TestCacheKeysTTLAndCopies(t *testing.T) {
 func TestCacheCapacityAndInvalidResults(t *testing.T) {
 	policy := fastPolicy()
 	policy.MaxCacheEntries = 2
-	p := protectedForTest(t, functionProvider{"cache", func(context.Context, Trip) (Quote, error) {
-		return sampleQuote(), nil
+	p := protectedForTest(t, functionProvider{"cache", func(context.Context, Trip) ([]Quote, error) {
+		return []Quote{sampleQuote()}, nil
 	}}, policy)
 	trip := sampleTrip(t)
 	for _, passengers := range []int{1, 2, 1, 3} {
@@ -288,15 +292,15 @@ func TestCacheCapacityAndInvalidResults(t *testing.T) {
 	p.mu.Unlock()
 	trip.Passengers = 2
 	q, err := p.Estimate(context.Background(), trip)
-	if err != nil || q.Cached || size != 2 {
+	if err != nil || q[0].Cached || size != 2 {
 		t.Fatal("cache must evict least recently used key at capacity")
 	}
 	var calls atomic.Int32
-	invalid := protectedForTest(t, functionProvider{"invalid", func(context.Context, Trip) (Quote, error) {
+	invalid := protectedForTest(t, functionProvider{"invalid", func(context.Context, Trip) ([]Quote, error) {
 		calls.Add(1)
 		q := sampleQuote()
-		q.AmountCents = nil
-		return q, nil
+		q.Fare = nil
+		return []Quote{q}, nil
 	}}, policy)
 	for n := 0; n < 2; n++ {
 		_, _ = invalid.Estimate(context.Background(), trip)
@@ -309,15 +313,15 @@ func TestCacheCapacityAndInvalidResults(t *testing.T) {
 func TestConcurrentComparisonsCoalesceAndWaiterCanCancel(t *testing.T) {
 	var calls atomic.Int32
 	started, release := make(chan struct{}), make(chan struct{})
-	p := protectedForTest(t, functionProvider{"shared", func(ctx context.Context, _ Trip) (Quote, error) {
+	p := protectedForTest(t, functionProvider{"shared", func(ctx context.Context, _ Trip) ([]Quote, error) {
 		if calls.Add(1) == 1 {
 			close(started)
 		}
 		select {
 		case <-ctx.Done():
-			return Quote{}, ctx.Err()
+			return nil, ctx.Err()
 		case <-release:
-			return sampleQuote(), nil
+			return []Quote{sampleQuote()}, nil
 		}
 	}}, fastPolicy())
 	trip := sampleTrip(t)
@@ -365,22 +369,23 @@ func TestBackoffHasBoundedExponentialJitter(t *testing.T) {
 
 func TestCachedComparisonKeepsOriginalFreshness(t *testing.T) {
 	quote := sampleQuote()
-	quote.CollectedAt = time.Now().Add(-time.Minute).UTC()
-	p := protectedForTest(t, functionProvider{"old", func(context.Context, Trip) (Quote, error) {
-		return quote, nil
+	quote.FetchedAt = time.Now().Add(-time.Minute).UTC()
+	quote.ExpiresAt = quote.FetchedAt.Add(2 * time.Minute)
+	p := protectedForTest(t, functionProvider{"old", func(context.Context, Trip) ([]Quote, error) {
+		return []Quote{quote}, nil
 	}}, fastPolicy())
 	service := NewService([]Provider{p}, time.Second)
 	trip := sampleTrip(t)
 	_ = service.Compare(context.Background(), trip)
 	comparison := service.Compare(context.Background(), trip)
-	if !comparison.Quotes[0].Cached || !comparison.CollectedAt.Equal(quote.CollectedAt) || !comparison.ExpiresAt.Equal(quote.CollectedAt.Add(2*time.Minute)) {
+	if !comparison.Quotes[0].Cached || !comparison.CollectedAt.Equal(quote.FetchedAt) || !comparison.ExpiresAt.Equal(quote.ExpiresAt) {
 		t.Fatal("recomparison extended the cached quote's display lifetime")
 	}
 }
 
 func TestFreshThenCachedComparisonHasIdenticalExpiry(t *testing.T) {
-	p := protectedForTest(t, functionProvider{"fresh", func(context.Context, Trip) (Quote, error) {
-		return sampleQuote(), nil // Timestamp is generated after Compare starts.
+	p := protectedForTest(t, functionProvider{"fresh", func(context.Context, Trip) ([]Quote, error) {
+		return []Quote{sampleQuote()}, nil // Timestamp is generated after Compare starts.
 	}}, fastPolicy())
 	service := NewService([]Provider{p}, time.Second)
 	trip := sampleTrip(t)
