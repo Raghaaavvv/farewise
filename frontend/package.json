@@ -1,0 +1,29 @@
+{
+  "name": "farewise-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.25.0",
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "scripts": {
+    "dev": "WATCHPACK_POLLING=1000 next dev --webpack --hostname 127.0.0.1",
+    "dev:phone": "WATCHPACK_POLLING=1000 next dev --webpack --hostname 0.0.0.0",
+    "build": "next build --webpack",
+    "start": "next start --hostname 127.0.0.1",
+    "typecheck": "next typegen && tsc --noEmit",
+    "format": "prettier --write src next.config.ts tsconfig.json package.json"
+  },
+  "dependencies": {
+    "next": "16.4.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "prettier": "3.8.1",
+    "typescript": "^5.9.0"
+  }
+}

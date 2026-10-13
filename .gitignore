@@ -1,0 +1,10 @@
+# Local dependencies and generated artifacts
+frontend/node_modules/
+frontend/.next/
+frontend/next-env.d.ts
+frontend/*.tsbuildinfo
+frontend/.env*
+backend/bin/
+.DS_Store
+*.log
+.env
