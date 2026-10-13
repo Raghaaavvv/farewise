@@ -21,6 +21,16 @@ func TestDemoProviderCancelsItsLatency(t *testing.T) {
 	}
 }
 
+func TestDemoProviderRejectsAlreadyCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	provider := DemoProvider{"instant", "Instant", 500, 100, 3, 0}
+	quotes, err := provider.Estimate(ctx, sampleTrip(t))
+	if !errors.Is(err, context.Canceled) || len(quotes) != 0 {
+		t.Fatal("zero-delay demo accepted an already-canceled context")
+	}
+}
+
 func TestHTTPProviderCancellationReachesServer(t *testing.T) {
 	for _, mode := range []string{"parent-cancel", "service-deadline"} {
 		t.Run(mode, func(t *testing.T) {

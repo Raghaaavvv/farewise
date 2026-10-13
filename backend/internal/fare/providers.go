@@ -37,12 +37,19 @@ func DemoProviders() []Provider {
 }
 
 func (p DemoProvider) Estimate(ctx context.Context, trip Trip) ([]Quote, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	timer := time.NewTimer(p.Latency)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-timer.C:
+	}
+	// A zero-delay timer and cancellation can become ready together.
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if trip.Scenario == "outage" && p.ID() == "ryde" {
 		return nil, errors.New("simulated provider failure")
