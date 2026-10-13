@@ -18,7 +18,16 @@ func main() {
 	if addr == "" {
 		addr = "127.0.0.1:8080"
 	}
-	service := fare.NewService(fare.DemoProviders(), 2*time.Second)
+	providers := fare.DemoProviders()
+	for i, provider := range providers {
+		protected, err := fare.NewProtectedProvider(provider, fare.DemoProviderPolicy())
+		if err != nil {
+			log.Fatal(err)
+		}
+		providers[i] = protected
+	}
+	// This total budget includes rate-limit waits, retries and adapter latency.
+	service := fare.NewService(providers, 5*time.Second)
 	server := &http.Server{
 		Addr: addr, Handler: api.NewHandler(service),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,

@@ -395,7 +395,7 @@ export default function Home() {
                 )}
                 <p className="location-privacy">
                   Location is requested only when you click. Coordinates are
-                  sent to this app and aren’t saved.
+                  sent to this app and aren’t written to disk.
                 </p>
               </div>
               <div className="trip-options">

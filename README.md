@@ -22,9 +22,10 @@ The current prototype demonstrates the complete frontend-to-backend comparison f
 - Explore everyday, busy-hour, rainy-day and provider-failure scenarios.
 - See loading states, validation errors, retry controls, quote details and expiration notices.
 - Keep healthy results visible when one provider is unavailable or times out.
+- Protect each demo provider with a token bucket, a 30-second success cache, shared in-progress lookups and bounded retries.
 - Use a responsive interface on desktop or iPhone.
 
-Prices are deterministic for the same inputs; refreshing updates their timestamps rather than pretending to observe a real price change. Demo comparisons expire after two minutes. All vehicles and service labels are illustrative, rather than verified provider products.
+Prices are deterministic for the same inputs. Refreshing within the 30-second cache window reuses successful quotes and their original timestamps; after cache expiry, fresh demo calculations get new timestamps. Demo quotes have a two-minute display lifetime that cache hits do not extend. All vehicles and service labels are illustrative, rather than verified provider products.
 
 ## Languages, frameworks and tools
 
@@ -55,10 +56,16 @@ flowchart TD
     E --> F[Resolve sample locations and calculate demo distance]
     F --> G[Comparison service]
     G --> H[Provider interface]
-    H --> I[Grab demo instance]
-    H --> J[Gojek demo instance]
-    H --> K[CDG Zig demo instance]
-    H --> L[Ryde demo instance]
+    H --> U[Independent protection wrapper for each provider]
+    U --> V[Success cache and shared in-progress lookup]
+    V -->|Cache miss| W[Token bucket and cooldown before every attempt]
+    W --> I[Grab demo instance]
+    W --> J[Gojek demo instance]
+    W --> K[CDG Zig demo instance]
+    W --> L[Ryde demo instance]
+    V -->|Cache hit| M
+    W --> X[Transient HTTP error: bounded retries and Retry-After]
+    X --> W
     I --> M[Collect results with per-provider deadlines]
     J --> M
     K --> M
@@ -72,7 +79,7 @@ flowchart TD
     T --> B
 ```
 
-The adapters run concurrently using goroutines. Each has an independent timeout, so a slow or failed adapter produces an unavailable result while the others remain usable. Real adapters will need to honor cancellation in their HTTP requests; an aggregation deadline alone cannot stop an implementation that ignores its context.
+The adapters run concurrently using goroutines. Each has an independent five-second total budget, including queueing, cooldowns, backoff and adapter execution, so a slow or failed adapter produces an unavailable result while the others remain usable. Real adapters will need to honor cancellation in their HTTP requests; an aggregation deadline alone cannot stop an implementation that ignores its context.
 
 ### How buttons reach the backend
 
@@ -82,7 +89,7 @@ The adapters run concurrently using goroutines. Each has an independent timeout,
 | **Compare rides** | Prevents the normal form submission, captures the current trip, sends JSON, displays loading placeholders, then replaces results |
 | **Use current location** | Calls browser geolocation after the click; sends latitude, longitude and accuracy to `POST /api/locations/current`; selects the returned location and asks the user to compare again |
 | **Cancel location lookup** | Aborts the backend request if started, ignores late browser callbacks, and restores manual selection; it cannot dismiss the browser's own permission prompt |
-| **Refresh comparison** or **Retry** | Calls the same comparison function with current form values |
+| **Refresh comparison** or **Retry** | Calls the same comparison function with current form values; successful quotes are reused during the 30-second backend cache window |
 | Change route, passengers, ride type or scenario | Updates local state; previous results remain visible with a notice until comparison is requested again |
 | Change sort order | Reorders the existing response in the browser; does not make another provider request |
 | Open quote details | Displays a dialog using fields already returned by the backend |
@@ -107,6 +114,9 @@ Go uses **structs, methods and interfaces** rather than Java-style classes and i
 | `Comparison` | Trip, collection of quotes, demo notice, collection time and expiry |
 | `Service` | Encapsulates the injected providers and their timeout; coordinates comparison |
 | `DemoProvider` | Holds a provider's demo configuration and implements estimation behavior |
+| `ProtectedProvider` | Wraps any `Provider` with a private cache, token bucket, cooldown, in-progress lookup sharing and retry policy |
+| `ProviderPolicy` | Configures request budgets, cache bounds and retry attempts for one provider |
+| `ProviderHTTPError` | Carries an HTTP status and `Retry-After` from an adapter to the retry layer |
 
 Prices use **integer cents** to avoid binary floating-point arithmetic for money. Optional amounts and ETAs use pointers in Go and `number | null` in TypeScript. A missing quote is represented as `null`, never as a zero-dollar ride.
 
@@ -122,7 +132,7 @@ type Provider interface {
 
 The current application creates **four differently configured instances of one `DemoProvider` type**. They implement this interface and return a shared `Quote` shape. They simulate fetching details; they do not fetch real app data.
 
-`NewService(providers, timeout)` injects these dependencies. The service knows the interface rather than depending on the concrete implementation. Tests can therefore substitute a slow fake provider. A future permitted integration can implement the same interface with provider-specific authentication, requests and response normalization.
+`main.go` wraps each demo instance using `NewProtectedProvider(provider, policy)` before injecting the wrapped list into `NewService(providers, timeout)`. Both the wrapper and underlying adapter implement `Provider`: this is the **decorator pattern through composition**. The service knows the interface rather than depending on the concrete implementation. Tests can therefore substitute a slow fake or a test-only HTTP adapter. A future permitted integration can implement the same interface with provider-specific authentication, requests and response normalization.
 
 This uses composition and an adapter-style boundary. It does not currently contain four independently reverse-engineered provider classes.
 
@@ -132,6 +142,7 @@ This uses composition and an adapter-style boundary. It does not currently conta
 - **Domain layer:** location, request, trip and quote models.
 - **Comparison service:** concurrency, deadlines, partial failures and result ordering.
 - **Provider layer:** estimation behavior behind a shared interface.
+- **Provider protection layer:** request budgets, memory cache, duplicate suppression and retry orchestration independent of fare calculations.
 - **Frontend API client:** typed transport functions and error propagation.
 - **UI layer:** interaction, loading states, sorting, dialogs and responsive presentation.
 
@@ -180,7 +191,7 @@ The map graphic is decorative, not a navigable map.
 | Trip changes after comparison | Results remain associated with the previous submitted trip and an update notice appears |
 | Demo expiry passes | UI marks the quotes expired and offers refresh; the backend does not enforce expiry at booking because booking is not implemented |
 
-The backend limits comparison bodies to 4 KB, applies server read/write timeouts, sends `Cache-Control: no-store`, and supports graceful shutdown. Unavailable results are sorted after available prices. These measures are not a replacement for production authentication, rate limiting or monitoring.
+The backend limits comparison bodies to 4 KB, applies server read/write timeouts, sends `Cache-Control: no-store`, and supports graceful shutdown. HTTP `no-store` prevents browser/proxy caching; it does not disable the explicit internal provider cache. Unavailable results are sorted after available prices. The outbound per-provider limits do not provide inbound abuse protection, authentication or production monitoring.
 
 ## Automated tests and continuous integration
 
@@ -196,6 +207,14 @@ The Go tests cover:
 | `TestDeviceLocationComparisonAndSwap` | Device coordinates survive validation and route swapping; conflicting IDs, missing coordinates and identical points are rejected |
 | `TestCurrentLocationEndpoint` | The coordinate endpoint validates JSON, returns the device point without adding it to the shared catalog, and sets no-store |
 | `TestCompareUsesActualDeviceCoordinates` | A full HTTP comparison uses the supplied coordinates and returns all four demo results |
+| `TestHTTP429HonorsRetryAfterThenCachesSuccess` | A real local `httptest` server returns 429 with `Retry-After: 1`, then 200; the second request occurs at least one second later, and a repeated trip makes no third request |
+| `TestHTTP429LongRetryAfterIsNotCappedToBackoff` | Integer and HTTP-date cooldowns outlast a short caller deadline, without an early retry |
+| `TestHTTP429DeadlineAndCooldownProtectOtherTrips` | A 429 on the final allowed attempt still prevents another route from contacting that provider during cooldown |
+| `TestHTTPRetryBudgetAndPermanentErrors` | 503 retries wait for exponential backoff and stop after three attempts; 401 is attempted once; errors are not cached |
+| `TestTokenBucketBurstRefillAndProviderIsolation` / `TestEachRetryConsumesAToken` | Burst/refill behavior, cancellation, independent buckets and retries consuming tokens |
+| `TestCacheKeysTTLAndCopies` / `TestCacheCapacityAndInvalidResults` | Route direction, precise coordinates, passengers, vehicle and scenario distinguish keys; expiry, LRU bounds and defensive quote copies work; invalid results are not cached |
+| `TestConcurrentComparisonsCoalesceAndWaiterCanCancel` / `TestFlightCapacityAndLeaderCancellation` | Concurrent identical trips use one adapter call; cancellation and queue capacity work without keeping failed flights |
+| `TestCachedComparisonKeepsOriginalFreshness` / `TestFreshThenCachedComparisonHasIdenticalExpiry` | Cached results keep their collection time and cannot extend the display expiry, including the very first refresh |
 
 Run all local checks:
 
@@ -223,7 +242,7 @@ Grab publishes a [Farefeed API](https://developer.grab.com/products/farefeed-api
 
 Permission to access the user's device location is different from permission to access data inside a ride-hailing app. The prototype now supports optional device location, while provider-app data access remains unresolved.
 
-**Use current location** invokes `navigator.geolocation.getCurrentPosition()` only after a click. The browser manages permission; an already-granted permission may not produce another prompt. The server cannot request device permission or read GPS directly. After permission succeeds, latitude, longitude and accuracy are sent in a POST body to this app's backend, which validates them and returns a `Current location` value. The coordinates are kept only in page/request memory, are not saved by the app, and are not sent to ride providers. The UI preserves manual selection after errors and ignores canceled lookups.
+**Use current location** invokes `navigator.geolocation.getCurrentPosition()` only after a click. The browser manages permission; an already-granted permission may not produce another prompt. The server cannot request device permission or read GPS directly. After permission succeeds, latitude, longitude and accuracy are sent in a POST body to this app's backend, which validates them and returns a `Current location` value. Raw coordinates stay in page/request memory and are not written to disk or sent to ride providers. The comparison cache retains a hashed route fingerprint and a quote, without raw coordinates, in bounded process memory. Hashing is not a guarantee of anonymization. The UI preserves manual selection after errors and ignores canceled lookups.
 
 Browser geolocation requires a secure context: localhost works for development, while iPhone access over the plain-HTTP LAN URL does not support this feature. Use HTTPS for phone geolocation; manual sample-location selection continues to work over the LAN URL. No reverse geocoding is performed, so the selected point is labelled **Current location**, rather than a street address. See [MDN's Geolocation API documentation](https://developer.mozilla.org/en-US/docs/Web/API/Geolocation_API).
 
@@ -231,9 +250,33 @@ Provider-specific pickup points, service names, ETAs and availability require a 
 
 ### 3. Respecting provider rate limits
 
-A timeout limits how long a request takes; it does **not** limit how often requests are sent. Concurrent goroutines do not implement rate limiting either. No outbound provider rate limiter exists yet because the adapters make no external requests.
+A timeout limits how long a request takes; it does **not** limit how often requests are sent. `ProtectedProvider` now applies these rules before contacting each underlying demo adapter:
 
-A live implementation should use provider-specific request budgets, bounded concurrency, request deduplication and caching where permitted. HTTP 429 responses and documented `Retry-After` instructions should govern retries, with bounded backoff and jitter where appropriate. Refresh controls should not create unbounded background polling. Tests will need to verify those behaviors against a fake HTTP server before live use.
+| Setting | Demo default and behavior |
+| --- | --- |
+| Token bucket | 2 attempts/second, burst of 2; every attempt, including retries, needs a token |
+| Success cache | 30 seconds from successful completion; available, valid quotes only |
+| Cache key | Directional route IDs and precise coordinates, passenger count, vehicle type, plus scenario and distance because they affect demo prices; each provider has its own namespace |
+| Memory bounds | 256 entries per provider with least-recently-used eviction; expired entries are removed on subsequent lookups; no disk persistence |
+| Duplicate suppression | Concurrent callers for the same key share one in-progress lookup rather than spending separate tokens |
+| Request capacity | At most 64 distinct in-progress cache misses per provider, including queued calls and retries; excess requests return an unavailable result |
+| Retry budget | At most 3 attempts total; only typed HTTP 429, 502, 503 and 504 errors are retryable; unclassified errors and permanent statuses are returned immediately |
+| Backoff | Capped exponential delay of 200 ms, 400 ms, then up to 1 second, with equal jitter between half and all of each delay; three attempts require at most two retry waits |
+| `Retry-After` | Integer seconds or HTTP-date; wait for at least the greater of the header delay and jittered backoff; malformed headers fall back to backoff |
+| Shared cooldown | A 429, or a retryable error carrying `Retry-After`, pauses new attempts for that provider, including different routes; already-started calls cannot be recalled |
+| Cancellation | Token waits, retry waits and coalesced waits honor context cancellation; the comparison's five-second budget includes all waits |
+
+`Retry-After` is **never shortened to the backoff cap**. A provider asking for a 60-second pause causes a five-second comparison to time out rather than retry early, while the provider-wide cooldown stays in effect. A cache hit spends no token, can be served during cooldown, and preserves the quote's original `collectedAt`; the response's `cached` field identifies actual cache reuse. Sharing an in-progress result is not marked as a cache hit.
+
+Read the implementation in this order: `DemoProviderPolicy` and wiring in `cmd/server/main.go`; `ProtectedProvider.Estimate` for caching and coalescing; `waitForToken` for budget/cooldown; `estimate` for retry orchestration; `ProviderHTTPError` and `ParseRetryAfter` for the future HTTP adapter contract. The test-only HTTP adapter closes response bodies and uses a context-aware request against `httptest`, never a real ride service.
+
+The first caller owns a shared lookup's context. If it cancels, waiting callers receive that cancellation and may explicitly try again; canceling only a waiting caller leaves the underlying lookup running. Cached pointer fields are copied so a caller cannot mutate the stored price. Cache expiry is enforced on read; expired entries can remain in memory until another lookup or process exit, subject to the entry bound.
+
+These are learning defaults, **not provider-approved quotas**. Before a live integration, configure the documented budget and cache permissions, scope caches to account/currency/region where needed, respect provider quote expiry and allowed retention, and coordinate limits across multiple server processes. An actual HTTP adapter must return `ProviderHTTPError` to opt into retry behavior. The decorator does not retry bookings, discover private endpoints or bypass access controls.
+
+### Possible estimation-first direction
+
+[RideGuru describes](https://ride.guru/content/about/faq) an algorithm using rates, route duration/distance and other travel factors, calibrated with submitted fares. Farewise could add a separately labelled algorithmic estimate provider behind the same `Provider` interface, with approved live quotes added later. That would need actual road routing, sourced fare rules or a lawful calibration dataset, uncertainty ranges, and validation against held-out trips. The current Haversine road factor and invented demo constants are not a calibrated model and cannot establish the cheapest app in real time.
 
 ### 4. Platform restrictions and access controls
 
@@ -348,7 +391,8 @@ Farewise.code-workspace      Portable VS Code workspace
 - [ ] Expand the quote contract to support ranges, real fee inclusions, provider expiry and source provenance.
 - [x] Add optional device geolocation with permission, validation, cancellation and manual fallback.
 - [ ] Add manual address search, geocoding and actual road routing.
-- [ ] Implement provider-specific rate limiting, bounded retries and permitted caching.
+- [x] Implement provider-specific rate limiting, bounded retries and a bounded short-TTL demo cache; test 429 behavior with a fake HTTP server.
+- [ ] Evaluate a calibrated algorithmic estimate provider, clearly separated from live quotes and demo prices.
 - [ ] Add browser interaction tests and runtime API response validation.
 - [ ] Add deployment configuration, authentication where needed and operational monitoring.
 

@@ -86,7 +86,7 @@ func (s *Service) Compare(ctx context.Context, trip Trip) Comparison {
 			case <-deadline.Done():
 				err = deadline.Err()
 			}
-			if err != nil || quote.AmountCents == nil || quote.ETAMinutes == nil || *quote.AmountCents <= 0 || *quote.ETAMinutes < 0 {
+			if err != nil || !validQuote(quote) {
 				message := "This provider is unavailable in the demo scenario."
 				if errors.Is(err, context.DeadlineExceeded) {
 					message = "This provider did not respond in time."
@@ -96,8 +96,20 @@ func (s *Service) Compare(ctx context.Context, trip Trip) Comparison {
 			results <- quote
 		}(provider)
 	}
+	var oldestCollectedAt time.Time
 	for range s.providers {
-		comparison.Quotes = append(comparison.Quotes, <-results)
+		quote := <-results
+		comparison.Quotes = append(comparison.Quotes, quote)
+		// Cache hits retain their real collection time and cannot extend the
+		// display lifetime simply because another comparison was requested.
+		if validQuote(quote) && !quote.CollectedAt.IsZero() &&
+			(oldestCollectedAt.IsZero() || quote.CollectedAt.Before(oldestCollectedAt)) {
+			oldestCollectedAt = quote.CollectedAt
+		}
+	}
+	if !oldestCollectedAt.IsZero() {
+		comparison.CollectedAt = oldestCollectedAt
+		comparison.ExpiresAt = oldestCollectedAt.Add(2 * time.Minute)
 	}
 	sort.Slice(comparison.Quotes, func(i, j int) bool {
 		a, b := comparison.Quotes[i], comparison.Quotes[j]

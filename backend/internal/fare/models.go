@@ -69,6 +69,7 @@ type Quote struct {
 	ETAMinutes      *int      `json:"etaMinutes"`
 	Source          string    `json:"source"`
 	CollectedAt     time.Time `json:"collectedAt"`
+	Cached          bool      `json:"cached"`
 	Capacity        int       `json:"capacity"`
 	Message         string    `json:"message"`
 	FeesDescription string    `json:"feesDescription"`

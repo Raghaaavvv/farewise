@@ -32,6 +32,7 @@ export type Quote = {
   etaMinutes: number | null;
   source: string;
   collectedAt: string;
+  cached: boolean;
   capacity: number;
   message: string;
   feesDescription: string;
