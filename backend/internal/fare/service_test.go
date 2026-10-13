@@ -16,7 +16,7 @@ func (slowProvider) Estimate(ctx context.Context, trip Trip) (Quote, error) {
 }
 
 func TestTimeoutKeepsOtherProviderResult(t *testing.T) {
-	trip, err := Validate(Request{"changi-t3", "orchard", 1, "standard", "normal"})
+	trip, err := Validate(Request{PickupID: "changi-t3", DropoffID: "orchard", Passengers: 1, RideType: "standard", Scenario: "normal"})
 	if err != nil {
 		t.Fatal(err)
 	}

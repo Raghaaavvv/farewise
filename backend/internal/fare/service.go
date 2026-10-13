@@ -18,15 +18,15 @@ func NewService(providers []Provider, timeout time.Duration) *Service {
 }
 
 func Validate(request Request) (Trip, error) {
-	pickup, found := FindLocation(request.PickupID)
-	if !found {
-		return Trip{}, errors.New("choose a pickup from the demo locations")
+	pickup, err := resolveLocation(request.PickupID, request.PickupCoordinates)
+	if err != nil {
+		return Trip{}, err
 	}
-	dropoff, found := FindLocation(request.DropoffID)
-	if !found {
-		return Trip{}, errors.New("choose a destination from the demo locations")
+	dropoff, err := resolveLocation(request.DropoffID, request.DropoffCoordinates)
+	if err != nil {
+		return Trip{}, err
 	}
-	if pickup.ID == dropoff.ID {
+	if pickup.Latitude == dropoff.Latitude && pickup.Longitude == dropoff.Longitude {
 		return Trip{}, errors.New("pickup and destination must be different")
 	}
 	if request.Passengers < 1 || request.Passengers > 6 {
@@ -52,6 +52,8 @@ func haversine(a, b Location) float64 {
 	rad := math.Pi / 180
 	dlat, dlon := (b.Latitude-a.Latitude)*rad, (b.Longitude-a.Longitude)*rad
 	x := math.Sin(dlat/2)*math.Sin(dlat/2) + math.Cos(a.Latitude*rad)*math.Cos(b.Latitude*rad)*math.Sin(dlon/2)*math.Sin(dlon/2)
+	// Rounding near antipodal points can otherwise make a square root negative.
+	x = math.Max(0, math.Min(1, x))
 	return 6371 * 2 * math.Atan2(math.Sqrt(x), math.Sqrt(1-x))
 }
 

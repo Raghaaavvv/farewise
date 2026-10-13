@@ -63,5 +63,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Type check
         run: pnpm typecheck
+      - name: Location permission and API tests
+        run: pnpm test
       - name: Production build
         run: pnpm build

@@ -12,6 +12,14 @@ export type TripRequest = {
   passengers: number;
   rideType: "standard" | "six";
   scenario: "normal" | "busy" | "rain" | "outage";
+  pickupCoordinates?: DeviceCoordinates;
+  dropoffCoordinates?: DeviceCoordinates;
+};
+
+export type DeviceCoordinates = {
+  latitude: number;
+  longitude: number;
+  accuracyMeters?: number;
 };
 
 export type Quote = {
@@ -72,6 +80,21 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export function fetchLocations(signal?: AbortSignal) {
   return request<{ locations: Location[] }>("/api/locations", { signal });
+}
+
+export function resolveCurrentLocation(
+  coordinates: DeviceCoordinates,
+  signal?: AbortSignal,
+) {
+  return request<{ location: Location; source: "device"; persisted: false }>(
+    "/api/locations/current",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(coordinates),
+      signal,
+    },
+  );
 }
 
 export function compareTrip(trip: TripRequest, signal?: AbortSignal) {

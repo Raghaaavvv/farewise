@@ -34,11 +34,20 @@ func FindLocation(id string) (Location, bool) {
 }
 
 type Request struct {
-	PickupID   string `json:"pickupId"`
-	DropoffID  string `json:"dropoffId"`
-	Passengers int    `json:"passengers"`
-	RideType   string `json:"rideType"`
-	Scenario   string `json:"scenario"`
+	PickupID           string       `json:"pickupId"`
+	DropoffID          string       `json:"dropoffId"`
+	Passengers         int          `json:"passengers"`
+	RideType           string       `json:"rideType"`
+	Scenario           string       `json:"scenario"`
+	PickupCoordinates  *Coordinates `json:"pickupCoordinates,omitempty"`
+	DropoffCoordinates *Coordinates `json:"dropoffCoordinates,omitempty"`
+}
+
+// Pointers distinguish omitted coordinates from valid zero latitude/longitude.
+type Coordinates struct {
+	Latitude       *float64 `json:"latitude"`
+	Longitude      *float64 `json:"longitude"`
+	AccuracyMeters *float64 `json:"accuracyMeters,omitempty"`
 }
 
 type Trip struct {

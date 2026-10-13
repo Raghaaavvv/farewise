@@ -12,6 +12,7 @@
     "build": "next build --webpack",
     "start": "next start --hostname 127.0.0.1",
     "typecheck": "next typegen && tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
     "format": "prettier --write src next.config.ts tsconfig.json package.json"
   },
   "dependencies": {
@@ -24,6 +25,7 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "prettier": "3.8.1",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.0"
   }
 }

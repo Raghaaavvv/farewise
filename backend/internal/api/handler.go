@@ -16,6 +16,26 @@ func NewHandler(service *fare.Service) http.Handler {
 	mux.HandleFunc("GET /api/locations", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"locations": fare.Locations, "source": "demo catalog"})
 	})
+	mux.HandleFunc("POST /api/locations/current", func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 1024)
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		var coordinates fare.Coordinates
+		if err := decoder.Decode(&coordinates); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "send valid device coordinates"})
+			return
+		}
+		if err := decoder.Decode(new(any)); err != io.EOF {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "send only one coordinate object"})
+			return
+		}
+		location, err := fare.CurrentLocation(coordinates)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"location": location, "source": "device", "persisted": false})
+	})
 	mux.HandleFunc("POST /api/compare", func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, 4096)
 		decoder := json.NewDecoder(r.Body)

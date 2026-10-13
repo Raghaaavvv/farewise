@@ -2,8 +2,21 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { compareTrip, fetchLocations, initialTrip, money } from "@/lib/api";
-import type { Comparison, Location, Quote, TripRequest } from "@/lib/api";
+import {
+  compareTrip,
+  fetchLocations,
+  initialTrip,
+  money,
+  resolveCurrentLocation,
+} from "@/lib/api";
+import type {
+  Comparison,
+  DeviceCoordinates,
+  Location,
+  Quote,
+  TripRequest,
+} from "@/lib/api";
+import { getDeviceCoordinates } from "@/lib/geolocation";
 import { Icon } from "@/components/icon";
 import { RoutePreview } from "@/components/route-preview";
 
@@ -25,6 +38,15 @@ export default function Home() {
   const [comparedTrip, setComparedTrip] = useState<TripRequest | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [locating, setLocating] = useState(false);
+  const [locationMessage, setLocationMessage] = useState("");
+  const [locationError, setLocationError] = useState("");
+  const [devicePosition, setDevicePosition] = useState<{
+    location: Location;
+    coordinates: DeviceCoordinates;
+  } | null>(null);
+  const locationAttempt = useRef(0);
+  const activeLocation = useRef<AbortController | null>(null);
   const [sort, setSort] = useState("price");
   const [detail, setDetail] = useState<Quote | "about" | null>(null);
   const [now, setNow] = useState(0);
@@ -57,6 +79,8 @@ export default function Home() {
     const tick = setInterval(() => setNow(Date.now()), 15000);
     return () => {
       activeRequest.current?.abort();
+      activeLocation.current?.abort();
+      locationAttempt.current += 1;
       clearInterval(tick);
     };
   }, []);
@@ -66,8 +90,67 @@ export default function Home() {
     if (!detail) dialog.current?.close();
   }, [detail]);
 
+  async function useCurrentLocation() {
+    const attempt = ++locationAttempt.current;
+    const controller = new AbortController();
+    activeLocation.current?.abort();
+    activeLocation.current = controller;
+    setLocating(true);
+    setLocationError("");
+    setLocationMessage(
+      "Waiting for location permission and a device position…",
+    );
+    try {
+      const coordinates = await getDeviceCoordinates();
+      if (locationAttempt.current !== attempt) return;
+      setLocationMessage("Setting your pickup location…");
+      const { location } = await resolveCurrentLocation(
+        coordinates,
+        controller.signal,
+      );
+      if (locationAttempt.current !== attempt) return;
+      setDevicePosition({ location, coordinates });
+      setTrip((t) => ({
+        ...t,
+        pickupId: location.id,
+        pickupCoordinates: coordinates,
+        dropoffCoordinates:
+          t.dropoffId === location.id ? coordinates : t.dropoffCoordinates,
+      }));
+      const accuracy = coordinates.accuracyMeters;
+      setLocationMessage(
+        `Current location selected${accuracy === undefined ? "" : ` · accuracy about ${Math.round(accuracy)} m`}. Compare rides to update.`,
+      );
+    } catch (err) {
+      if (locationAttempt.current === attempt && !controller.signal.aborted) {
+        setLocationMessage("");
+        setLocationError(
+          err instanceof Error
+            ? err.message
+            : "Could not use your location. Choose a pickup manually.",
+        );
+      }
+    } finally {
+      if (locationAttempt.current === attempt) setLocating(false);
+    }
+  }
+
+  function cancelLocationLookup() {
+    locationAttempt.current += 1;
+    activeLocation.current?.abort();
+    setLocating(false);
+    setLocationMessage(
+      "Location request canceled. You can choose a pickup manually.",
+    );
+  }
+
+  const locationOptions = devicePosition
+    ? [devicePosition.location, ...locations]
+    : locations;
+
   async function compare(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
+    if (locating) return;
     activeRequest.current?.abort();
     const controller = new AbortController();
     activeRequest.current = controller;
@@ -204,18 +287,39 @@ export default function Home() {
                   <i />
                   <span />
                 </div>
-                <label className="location-field">
-                  <span>PICKUP</span>
+                <div className="location-field">
+                  <div className="pickup-label-row">
+                    <label htmlFor="pickup-location">PICKUP</label>
+                    <button
+                      type="button"
+                      className="use-location-button"
+                      onClick={() => void useCurrentLocation()}
+                      disabled={locating || loading}
+                    >
+                      <Icon name="pin" size={13} />
+                      {locating ? "Locating…" : "Use current location"}
+                    </button>
+                  </div>
                   <select
+                    id="pickup-location"
                     aria-label="Pickup location"
                     value={trip.pickupId}
-                    onChange={(e) =>
-                      setTrip((t) => ({ ...t, pickupId: e.target.value }))
-                    }
-                    disabled={loading && !locations.length}
+                    onChange={(e) => {
+                      setTrip((t) => ({
+                        ...t,
+                        pickupId: e.target.value,
+                        pickupCoordinates:
+                          e.target.value === "current-location"
+                            ? devicePosition?.coordinates
+                            : undefined,
+                      }));
+                      setLocationError("");
+                      setLocationMessage("");
+                    }}
+                    disabled={locating || (loading && !locations.length)}
                   >
-                    {locations.length ? (
-                      locations.map((l) => (
+                    {locationOptions.length ? (
+                      locationOptions.map((l) => (
                         <option key={l.id} value={l.id}>
                           {l.name}
                         </option>
@@ -226,16 +330,19 @@ export default function Home() {
                       </option>
                     )}
                   </select>
-                </label>
+                </div>
                 <button
                   className="swap-button"
                   type="button"
                   aria-label="Swap pickup and destination"
+                  disabled={locating}
                   onClick={() =>
                     setTrip((t) => ({
                       ...t,
                       pickupId: t.dropoffId,
                       dropoffId: t.pickupId,
+                      pickupCoordinates: t.dropoffCoordinates,
+                      dropoffCoordinates: t.pickupCoordinates,
                     }))
                   }
                 >
@@ -247,12 +354,19 @@ export default function Home() {
                     aria-label="Destination"
                     value={trip.dropoffId}
                     onChange={(e) =>
-                      setTrip((t) => ({ ...t, dropoffId: e.target.value }))
+                      setTrip((t) => ({
+                        ...t,
+                        dropoffId: e.target.value,
+                        dropoffCoordinates:
+                          e.target.value === "current-location"
+                            ? devicePosition?.coordinates
+                            : undefined,
+                      }))
                     }
-                    disabled={loading && !locations.length}
+                    disabled={locating || (loading && !locations.length)}
                   >
-                    {locations.length ? (
-                      locations.map((l) => (
+                    {locationOptions.length ? (
+                      locationOptions.map((l) => (
                         <option key={l.id} value={l.id}>
                           {l.name}
                         </option>
@@ -262,6 +376,27 @@ export default function Home() {
                     )}
                   </select>
                 </label>
+              </div>
+              <div className="location-feedback">
+                {locationMessage && <p role="status">{locationMessage}</p>}
+                {locationError && (
+                  <p className="field-error" role="alert">
+                    {locationError}
+                  </p>
+                )}
+                {locating && (
+                  <button
+                    type="button"
+                    className="text-button"
+                    onClick={cancelLocationLookup}
+                  >
+                    Cancel location lookup
+                  </button>
+                )}
+                <p className="location-privacy">
+                  Location is requested only when you click. Coordinates are
+                  sent to this app and aren’t saved.
+                </p>
               </div>
               <div className="trip-options">
                 <label>
@@ -310,7 +445,7 @@ export default function Home() {
               )}
               <button
                 className="compare-button"
-                disabled={loading || invalid}
+                disabled={loading || locating || invalid}
                 type="submit"
               >
                 {loading ? "Comparing your options…" : "Compare rides"}
@@ -500,7 +635,7 @@ export default function Home() {
                 <button
                   className="text-button"
                   onClick={() => void compare()}
-                  disabled={loading || invalid}
+                  disabled={loading || locating || invalid}
                 >
                   <Icon name="refresh" size={14} /> Refresh comparison
                 </button>
