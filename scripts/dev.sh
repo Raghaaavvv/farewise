@@ -11,6 +11,11 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 # Run the built binary directly, so stopping this script stops the actual API.
 cd "$PROJECT_ROOT/backend"
+if [ -f .env ]; then
+  set -a
+  source .env
+  set +a
+fi
 mkdir -p bin
 go build -o bin/farewise ./cmd/server
 bin/farewise &

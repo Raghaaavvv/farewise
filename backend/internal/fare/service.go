@@ -3,6 +3,7 @@ package fare
 import (
 	"context"
 	"errors"
+	"farewise/backend/internal/routing"
 	"log/slog"
 	"math"
 	"sort"
@@ -72,7 +73,9 @@ func Validate(request Request) (Trip, error) {
 	}
 	// Straight-line distance times an illustrative road factor. Not real routing.
 	distance := math.Round(haversine(pickup, dropoff)*1.25*10) / 10
-	return Trip{pickup, dropoff, request.Passengers, request.RideType, request.Scenario, distance}, nil
+	return Trip{Pickup: pickup, Dropoff: dropoff, Passengers: request.Passengers,
+		RideType: request.RideType, Scenario: request.Scenario, DistanceKM: distance,
+		Route: routing.Route{Source: "approximate", DistanceMeters: distance * 1000}}, nil
 }
 
 func haversine(a, b Location) float64 {

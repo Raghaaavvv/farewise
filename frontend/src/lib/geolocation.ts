@@ -18,13 +18,13 @@ export function getDeviceCoordinates(
   if (!env.secure)
     return Promise.reject(
       new Error(
-        "Location access needs HTTPS or localhost. Open this app securely, or choose a pickup manually.",
+        "Location access needs HTTPS or localhost. Open this app securely, or choose a location manually.",
       ),
     );
   if (!env.geolocation)
     return Promise.reject(
       new Error(
-        "This browser does not support location access. Choose a pickup manually.",
+        "This browser does not support location access. Choose a location manually.",
       ),
     );
   return new Promise((resolve, reject) => {
@@ -37,14 +37,14 @@ export function getDeviceCoordinates(
         }),
       (error) => {
         const messages: Record<number, string> = {
-          1: "Location permission was denied. Allow location in your browser settings to try again, or choose a pickup manually.",
-          2: "Your device could not determine its location. Try again or choose a pickup manually.",
-          3: "Location lookup timed out. Try again or choose a pickup manually.",
+          1: "Location permission was denied. Allow location in your browser settings to try again, or choose a location manually.",
+          2: "Your device could not determine its location. Try again or choose a location manually.",
+          3: "Location lookup timed out. Try again or choose a location manually.",
         };
         reject(
           new Error(
             messages[error.code] ??
-              "Could not retrieve your location. Choose a pickup manually.",
+              "Could not retrieve your location. Choose a location manually.",
           ),
         );
       },

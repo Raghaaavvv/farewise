@@ -11,6 +11,8 @@ export type {
   FareRange,
   Quote,
   Comparison,
+  Route,
+  RoutingSource,
 } from "./contracts";
 
 export type TripRequest = {

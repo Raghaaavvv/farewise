@@ -1,87 +1,75 @@
-export function RoutePreview({ distance }: { distance?: number }) {
+import type { Route } from "@/lib/api";
+import { Icon } from "./icon";
+
+export function RoutePreview({
+  route,
+  loading,
+  dirty,
+}: {
+  route?: Route;
+  loading: boolean;
+  dirty: boolean;
+}) {
   return (
     <div
-      className="route-preview"
-      aria-label="Illustrative route graphic, not a navigable map"
+      className="route-preview route-summary"
+      aria-label="Trip distance and driving time"
+      aria-busy={loading}
     >
-      <svg viewBox="0 0 520 250" fill="none" aria-hidden="true">
-        <defs>
-          <pattern
-            id="streets"
-            width="55"
-            height="50"
-            patternUnits="userSpaceOnUse"
-            patternTransform="rotate(-20)"
-          >
-            <path d="M0 0H55V50" stroke="#fff" strokeWidth="5" />
-            <path d="M25 0v50M0 25h55" stroke="#fff" strokeWidth="2" />
-          </pattern>
-        </defs>
-        <rect width="520" height="250" fill="#eaf0e9" />
-        <path
-          d="M0 180c90-55 160 45 250 12s156-35 270-9v67H0z"
-          fill="#dcebea"
-        />
-        <path
-          d="M0 0h520v168c-105-15-170 30-230 25S155 140 0 180z"
-          fill="url(#streets)"
-        />
-        <path
-          d="M88 158h52l54-42h92l73-58h64"
-          stroke="#d8ddd3"
-          strokeWidth="13"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-        <path
-          d="M88 158h52l54-42h92l73-58h64"
-          stroke="#187a64"
-          strokeWidth="4"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-        <circle cx="88" cy="158" r="13" fill="#fff" />
-        <circle cx="88" cy="158" r="7" fill="#192d29" />
-        <circle cx="423" cy="58" r="13" fill="#fff" />
-        <circle cx="423" cy="58" r="7" fill="#187a64" />
-        <rect x="205" y="80" width="109" height="31" rx="15.5" fill="#fff" />
-        <text
-          x="259"
-          y="100"
-          textAnchor="middle"
-          fill="#42635a"
-          fontSize="11"
-          fontFamily="sans-serif"
-        >
-          ROUTE PREVIEW
-        </text>
-        <text
-          x="55"
-          y="192"
-          fill="#5b756b"
-          fontSize="12"
-          fontFamily="sans-serif"
-        >
-          Destination
-        </text>
-        <text
-          x="396"
-          y="91"
-          fill="#5b756b"
-          fontSize="12"
-          fontFamily="sans-serif"
-        >
-          Pickup
-        </text>
-      </svg>
-      <div className="map-caption">
-        <span>Illustration · Singapore</span>
-        <span>
-          {distance
-            ? `${distance.toFixed(1)} km · demo distance`
-            : "Your way home"}
-        </span>
+      <div className="route-summary-heading">
+        <Icon name="car" size={19} />
+        <strong>Journey distance</strong>
       </div>
+      {loading ? (
+        <p>Calculating your trip…</p>
+      ) : !route ? (
+        <p>Compare a trip to see its distance.</p>
+      ) : (
+        <>
+          <div className="route-metrics">
+            <div>
+              <strong>{(route.distanceMeters / 1000).toFixed(1)} km</strong>
+              <span>
+                {route.source === "onemap"
+                  ? "Driving distance"
+                  : "Approximate distance"}
+              </span>
+            </div>
+            <div>
+              <strong>
+                {route.durationSeconds === null
+                  ? "—"
+                  : `${Math.ceil(route.durationSeconds / 60)} min`}
+              </strong>
+              <span>Estimated driving time</span>
+            </div>
+          </div>
+          {dirty && (
+            <p className="route-stale">
+              Previous trip · compare again to update.
+            </p>
+          )}
+          {route.source === "onemap" ? (
+            <p>
+              Route data:{" "}
+              <a
+                href="https://www.onemap.gov.sg/"
+                target="_blank"
+                rel="noreferrer"
+              >
+                OneMap / Singapore Land Authority
+              </a>
+              . Travel time does not include waiting for pickup; live traffic is
+              not included.
+            </p>
+          ) : (
+            <p>
+              Illustrative straight-line distance × 1.25. Configure OneMap for
+              road routing; no driving time is estimated in demo mode.
+            </p>
+          )}
+        </>
+      )}
     </div>
   );
 }

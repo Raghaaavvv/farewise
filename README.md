@@ -8,9 +8,9 @@ Farewise started with a familiar problem: after landing at the airport, finding 
 
 The current prototype demonstrates the complete frontend-to-backend comparison flow using simulated providers. **Every fare, pickup estimate and availability result is invented. No provider servers are contacted, and the app cannot book rides.** A working comparison interface does not yet mean that live fare access has been solved.
 
-![Farewise prototype showing simulated products, ranges and partial data](docs/images/products.png)
+![Farewise prototype showing simulated products, ranges and partial data](docs/images/routing.png)
 
-[View the iPhone layout](docs/images/products-iphone.png)
+[View the iPhone layout](docs/images/routing-iphone.png)
 
 ## What works today
 
@@ -18,7 +18,8 @@ The current prototype demonstrates the complete frontend-to-backend comparison f
 - Receive multiple products from one provider, with standard, premium, pool and taxi categories; filter categories without making another request.
 - Display exact fares or min/max ranges, preserve useful partial data, and show each product's expiry independently.
 - Choose pickup and destination from nine sample Singapore locations, or swap them.
-- Use **Use current location** to request browser permission, validate the device coordinates through the Go API, and select them as the pickup. Swapping the route preserves the coordinates.
+- Use **Use current location** separately for pickup or drop-off: request browser permission, validate the coordinates through Go, and preserve independent endpoint snapshots when swapping.
+- Fetch Singapore driving distance and estimated travel time from OneMap when configured; otherwise explicitly show approximate distance with no invented driving time. Fares remain simulated in both modes.
 - Select one to six passengers and standard or six-seater vehicles. More than four passengers automatically selects a six-seater.
 - Sort results by the lowest fare or soonest pickup.
 - Explore everyday, busy-hour, rainy-day and provider-failure scenarios.
@@ -39,7 +40,8 @@ Prices are deterministic for the same inputs. Refreshing within the cache window
 | **Next.js 16.4** | React App Router frontend and a same-origin proxy to the Go API |
 | **React** | Components, form state, asynchronous comparison state and interactive results |
 | **TypeScript** | Typed requests, responses, locations, quotes and UI state |
-| **HTML, CSS and SVG** | Semantic controls, responsive layouts, icons and an illustrative route graphic |
+| **HTML, CSS and SVG** | Semantic controls, responsive layouts, icons and a sourced journey-distance summary |
+| **OneMap REST API** | Optional Singapore driving-route distance and duration, called only from Go with a backend token |
 | **pnpm** | Frontend dependency management and reproducible lockfile-based installs |
 | **Prettier** | Frontend source formatting |
 | **Go `testing` / `httptest`** | Unit and HTTP handler tests without external test dependencies |
@@ -56,8 +58,13 @@ flowchart TD
     B --> C[TypeScript API client: POST /api/compare]
     C --> D[Next.js same-origin API proxy]
     D --> E[Go HTTP handler: decode and validate]
-    E --> F[Resolve sample locations and calculate demo distance]
-    F --> G[Comparison service]
+    E --> F[Resolve catalog or independent device coordinates]
+    F --> Y{Routing configuration}
+    Y -->|OneMap enabled| Z[One driving-route request: distance and duration]
+    Y -->|Offline demo| AA[Labelled Haversine approximation]
+    Z -->|Success| G[Comparison service]
+    Z -->|Failure| AB[Return routing error without estimating fares]
+    AA --> G
     G --> H[Bounded workers and shared provider semaphore]
     H --> U[Independent protection wrapper for each provider]
     U --> V[Success cache and shared in-progress lookup]
@@ -115,7 +122,9 @@ Go uses **structs, methods and interfaces** rather than Java-style classes and i
 | `Location` | ID, name, description, latitude and longitude |
 | `Request` | Pickup/destination IDs, passenger count, vehicle type and demo scenario |
 | `Coordinates` | Optional device latitude, longitude and accuracy; missing coordinate fields are distinct from valid zero values |
-| `Trip` | Resolved location objects, passenger count, vehicle type, scenario and demo distance |
+| `Trip` | Resolved locations, passenger count, vehicle type, scenario, distance in km, and a sourced route summary |
+| `routing.Route` | Distance in meters, nullable journey duration in seconds, source (`approximate` / `onemap`) and traffic-awareness flag |
+| `routing.Router` | Injectable driving-route interface independent of ride-fare providers |
 | `Quote` | Provider and product identity, category, status, currency, optional fare range and ETA, source, fetched/expiry timestamps and capacity |
 | `FareRange` | `MinFare` and `MaxFare` in integer cents; equal bounds are a point fare, different bounds are a range |
 | `Comparison` | Trip, collection of quotes, demo notice, collection time and expiry |
@@ -163,7 +172,7 @@ Other skills exercised include REST API design, JSON serialization, React hooks,
 
 ### Runtime validation at the frontend boundary
 
-`src/lib/contracts.ts` parses unknown JSON into narrowly validated UI types before state is updated. No success response is accepted merely through a TypeScript assertion. The parser checks all consumed fields, nullable fares/ETAs, safe integer cents, finite coordinate ranges, recognized categories/statuses/sources, duplicate provider-product IDs, status consistency and RFC 3339 timestamp ordering. Additive unknown fields are ignored; required values are not coerced. Location catalog and current-location responses are validated too.
+`src/lib/contracts.ts` parses unknown JSON into narrowly validated UI types before state is updated. No success response is accepted merely through a TypeScript assertion. The parser checks all consumed fields, sourced route distance/duration and consistency with kilometers, nullable fares/ETAs, safe integer cents, finite coordinate ranges, recognized categories/statuses/sources, duplicate provider-product IDs, status consistency and RFC 3339 timestamp ordering. Additive unknown fields are ignored; required values are not coerced. Location catalog and current-location responses are validated too.
 
 A malformed HTTP 200 produces an actionable invalid-response error. Malformed error bodies and non-JSON responses produce the existing unavailable-service message. The client never renders an arbitrary error object. UI helpers filter categories, handle expired products and sort ranges by their lower bound; a lowest-fare badge appears only when a product's entire range is strictly below every other fresh price in the selected category. Overlapping ranges, ties and the all-category view have no winner badge.
 
@@ -186,16 +195,22 @@ a = sin²(Δlatitude / 2)
 distance = 2 × 6371 × atan2(√a, √(1 − a))
 ```
 
-The prototype multiplies that distance by **1.25** and rounds it to one decimal place as an illustrative road-distance approximation. This factor is invented. It does not account for real roads, traffic, closures, terminal pickup arrangements or the provider's route.
+In the default offline mode, the prototype multiplies that distance by **1.25** and rounds it to one decimal place as an illustrative road-distance approximation. This factor is invented. It does not account for real roads, traffic, closures, terminal pickup arrangements or the provider's route.
 
-Device location acquisition is implemented; address lookup and road routing remain future work:
+Device acquisition and optional OneMap road routing are implemented; address lookup remains future work:
 
 - **Device geolocation:** obtains the user's coordinates with permission.
 - **Geocoding:** converts an address or selected place into coordinates.
 - **Reverse geocoding:** converts coordinates into an address or place description.
 - **Routing:** calculates a traversable road route and driving distance.
 
-The map graphic is decorative, not a navigable map.
+The journey summary shows numeric distance and duration with source attribution; it is not a navigation map. OneMap routing is requested once per comparison before provider fan-out. Its returned meters are divided by 1,000 without backend rounding, so every provider receives the same road distance. Display rounding does not change fare inputs. Journey duration is separate from the simulated pickup ETA. OneMap’s documented driving response does not establish live traffic awareness or guarantee the shortest route, so `trafficAware` is false.
+
+Each endpoint has its own saved current-location snapshot. Both can use the reserved `current-location` ID, provided their coordinates differ. Capturing one never overwrites the other. Clicking both buttons while stationary will usually produce the same location, which is rejected as a zero-length trip. Choose a different catalog endpoint or capture a second position after moving. Swapping moves coordinates and saved selector options together.
+
+With OneMap enabled, **Compare rides** sends both endpoint coordinates to OneMap. The coordinate-validation endpoint itself makes no third-party request. Coordinates are not written to disk or included in logs; the existing in-memory quote cache retains hashed trip fingerprints and quote results briefly, without raw coordinates. The interface discloses OneMap sharing before comparison. Request bodies are not placed in URL queries by the browser, but the backend-to-OneMap request follows OneMap’s documented query-parameter format.
+
+The OneMap client has its own three-second context budget (including pacing and queueing), at most two in-flight calls and a two-calls-per-second pace per process. HTTP 429 establishes a shared `Retry-After` cooldown; later calls wait or cancel. There are no automatic routing retries and no routing-response cache. These limits do not coordinate multiple backend instances. The existing five-second provider budget begins after routing succeeds. Routing failures return 422 (unsupported/unroutable locations), 503 (token/quota), 504 (timeout) or 502 (upstream/response failures), without falling back to an approximation. Logs record routing source, latency and success without coordinates, request URLs, tokens or upstream bodies.
 
 ## Error handling and reliability
 
@@ -206,7 +221,7 @@ The map graphic is decorative, not a navigable map.
 | Invalid passenger count or incompatible vehicle capacity | Validation failure; the UI also selects a six-seater for more than four passengers |
 | Unknown demo scenario | HTTP 400 |
 | Missing or invalid device coordinates, negative accuracy, or coordinates attached to a conflicting catalog ID | HTTP 400; current-location comparisons require their coordinate payload |
-| Location permission denied, lookup unavailable or timed out | Actionable message; the previous pickup is preserved and manual selection remains available |
+| Location permission denied, lookup unavailable or timed out | Actionable message; the previous endpoint is preserved and manual selection remains available |
 | Location requested from an insecure origin or unsupported browser | No device lookup is started; the UI explains the manual fallback |
 | Provider returns several products or a partial response | Healthy products and useful partial fields are preserved; a whole-provider unavailable entry is used only when no valid product remains |
 | Product has an invalid range or negative ETA | That field is removed; a usable sibling field can remain as partial data |
@@ -247,6 +262,11 @@ The Go tests cover:
 | `TestConcurrencyLimitAcrossComparisons` / `TestCanceledQueueDoesNotStartMoreProviders` | Twelve providers across two simultaneous comparisons never exceed the configured global limit; canceled queued jobs do not call adapters |
 | `TestMultipleProductsPartialDataAndErrors` / `TestQuoteNormalizationPreservesSiblings` | Multi-product responses, partial fields, partial errors, range normalization and malformed siblings do not discard healthy products |
 | `TestBundleCacheHonorsShortestProductTTLAndCopies` | Whole-batch cache expires no later than the shortest product lifetime and copies nested fare/ETA values |
+| `TestOneMapDrivingRouteContract` / `TestOneMapInvalidResponsesAndErrors` | Driving query/authentication and response parsing, missing fields, no route, malformed JSON, token and server failures |
+| `TestOneMapCancellationReachesHTTPServer` / `TestOneMapDeadlineWhileReadingResponse` | Canceling a real outbound request is observed by the local fake server and frees the routing permit; deadlines while reading a streamed body remain timeouts |
+| `TestOneMap429AppliesSharedCooldown` / `TestOneMapPacingAndCancellationBeforeRequest` / `TestOneMapConcurrencyLimitAndCanceledQueue` | Quota cooldown and request pacing block subsequent calls while respecting caller cancellation |
+| `TestRoadDistanceFlowsToEveryProvider` / `TestRoutingFailureDoesNotUseApproximateFare` | A single route feeds all four providers; routing errors prevent fare evaluation instead of hiding failures behind demo distance |
+| `TestInvalidTripsAndLocationCaptureDoNotCallRouter` | Validation failures and coordinate capture do not make external routing requests |
 | `TestStructuredProviderLogs` | Logs contain latency, outcome and cache fields without adapter secrets or route data |
 
 Run all local checks:
@@ -257,9 +277,9 @@ bash scripts/check.sh
 
 This runs Go tests with the race detector, `go vet`, frontend location/API unit tests, TypeScript checks and a production Next.js build. GitHub Actions runs the equivalent checks on pushes and pull requests. The Go workflow checks both the supported minimum version and the current development version.
 
-The 21 frontend tests cover synthetic geolocation and coordinate requests, runtime response validation (including malformed successful responses), category filtering, product identity, missing ETAs, range display, overlapping ranges and per-product expiry. Run them with `pnpm test` from `frontend/`. They do not read anyone's real location or display a real permission prompt.
+The 25 frontend tests cover synthetic geolocation and coordinate requests, runtime response validation (including malformed successful responses), category filtering, product identity, missing ETAs, range display, overlapping ranges, per-product expiry, independent endpoint capture/swapping and routing contract validation. Run them with `pnpm test` from `frontend/`. They do not read anyone's real location or display a real permission prompt.
 
-TypeScript checking and a production build are static/build checks. Domain helpers and API boundaries have behavioral unit tests, but a repeatable full browser suite remains a future improvement. Category filtering, multiple products, partial ETA display and product expiry were also checked in the local browser, along with a 390-pixel iPhone layout with no horizontal overflow. The screenshots show synthetic demo data in the all-category desktop view and premium iPhone view.
+TypeScript checking and a production build are static/build checks. Domain helpers and API boundaries have behavioral unit tests, but a repeatable full browser suite remains a future improvement. Category filtering, multiple products, partial ETA display and product expiry were also checked in the local browser, along with a 390-pixel iPhone layout with no horizontal overflow. The current screenshots show both location buttons and the offline journey-distance summary with synthetic demo fare data. The journey summary remains visible on iPhone.
 
 ## Challenges and problems identified so far
 
@@ -275,7 +295,7 @@ Grab publishes a [Farefeed API](https://developer.grab.com/products/farefeed-api
 
 Permission to access the user's device location is different from permission to access data inside a ride-hailing app. The prototype now supports optional device location, while provider-app data access remains unresolved.
 
-**Use current location** invokes `navigator.geolocation.getCurrentPosition()` only after a click. The browser manages permission; an already-granted permission may not produce another prompt. The server cannot request device permission or read GPS directly. After permission succeeds, latitude, longitude and accuracy are sent in a POST body to this app's backend, which validates them and returns a `Current location` value. Raw coordinates stay in page/request memory and are not written to disk or sent to ride providers. The comparison cache retains a hashed route fingerprint and a quote, without raw coordinates, in bounded process memory. Hashing is not a guarantee of anonymization. The UI preserves manual selection after errors and ignores canceled lookups.
+**Use current location** invokes `navigator.geolocation.getCurrentPosition()` only after a click. The browser manages permission; an already-granted permission may not produce another prompt. The server cannot request device permission or read GPS directly. After permission succeeds, latitude, longitude and accuracy are sent in a POST body to this app's backend, which validates them and returns a `Current location` value. Raw coordinates stay in page/request memory and are not written to disk or sent to ride providers. When OneMap routing is enabled, comparing forwards both endpoint coordinates to OneMap for the route calculation. The comparison cache retains a hashed route fingerprint and a quote, without raw coordinates, in bounded process memory. Hashing is not a guarantee of anonymization. The UI preserves manual selection after errors and ignores canceled lookups.
 
 Browser geolocation requires a secure context: localhost works for development, while iPhone access over the plain-HTTP LAN URL does not support this feature. Use HTTPS for phone geolocation; manual sample-location selection continues to work over the LAN URL. No reverse geocoding is performed, so the selected point is labelled **Current location**, rather than a street address. See [MDN's Geolocation API documentation](https://developer.mozilla.org/en-US/docs/Web/API/Geolocation_API).
 
@@ -289,7 +309,7 @@ A timeout limits how long a request takes; it does **not** limit how often reque
 | --- | --- |
 | Token bucket | 2 attempts/second, burst of 2; every attempt, including retries, needs a token |
 | Success cache | Complete, valid available batches only; expires at the earlier of 30 seconds from completion or the shortest product expiry; partial/error batches are not cached |
-| Cache key | Directional route IDs and precise coordinates, passenger count, vehicle type, plus scenario and distance because they affect demo prices; each provider has its own namespace |
+| Cache key | Directional route IDs and precise coordinates, passenger count, vehicle type, plus scenario, distance, route source and duration; route provenance prevents reusing quotes across different feature inputs; each provider has its own namespace |
 | Memory bounds | 256 entries per provider with least-recently-used eviction; expired entries are removed on subsequent lookups; no disk persistence |
 | Duplicate suppression | Concurrent callers for the same key share one in-progress lookup rather than spending separate tokens |
 | Request capacity | At most 64 distinct in-progress cache misses per provider, including queued calls and retries; excess requests return an unavailable result |
@@ -309,7 +329,7 @@ These are learning defaults, **not provider-approved quotas**. Before a live int
 
 ### Possible estimation-first direction
 
-[RideGuru describes](https://ride.guru/content/about/faq) an algorithm using rates, route duration/distance and other travel factors, calibrated with submitted fares. Farewise could add a separately labelled algorithmic estimate provider behind the same `Provider` interface, with approved live quotes added later. That would need actual road routing, sourced fare rules or a lawful calibration dataset, uncertainty ranges, and validation against held-out trips. The current Haversine road factor and invented demo constants are not a calibrated model and cannot establish the cheapest app in real time.
+[RideGuru describes](https://ride.guru/content/about/faq) an algorithm using rates, route duration/distance and other travel factors, calibrated with submitted fares. Farewise could add a separately labelled algorithmic estimate provider behind the same `Provider` interface, with approved live quotes added later. That would need sourced fare rules or a lawful calibration dataset, uncertainty ranges, and validation against held-out trips. The current Haversine road factor and invented demo constants are not a calibrated model and cannot establish the cheapest app in real time.
 
 ### 4. Platform restrictions and access controls
 
@@ -367,16 +387,30 @@ This exposes the development frontend to the local network. The Go API can remai
 | --- | --- | --- |
 | `FAREWISE_ADDR` | `127.0.0.1:8080` | Go API listening address |
 | `API_BASE_URL` | `http://127.0.0.1:8080` | Next.js server-side API proxy target; set before startup |
+| `FAREWISE_ROUTING_PROVIDER` | `approximate` | `approximate` uses offline demo distance; `onemap` requests Singapore driving routes |
+| `ONEMAP_TOKEN` | unset | Backend-only OneMap access token, required in `onemap` mode |
 | `WATCHPACK_POLLING` | `1000` during development | Polling interval in milliseconds |
 
-No provider keys are required or read in demo mode. Future secrets should remain in the backend environment and should never be committed or exposed through browser code.
+No ride-provider keys are required. Routing defaults to offline mode and makes no OneMap requests. Backend startup fails clearly when `onemap` is selected without a token or a routing mode is misspelled. Never use a `NEXT_PUBLIC_` variable for tokens.
+
+### Enable free OneMap driving routes
+
+[OneMap’s official workshop material describes its APIs as free to use](https://www.onemap.gov.sg/apidocs/static/media/OneMap_API_Workshop_Presentation_260825.04f72136081dd249c5ee.pdf), with token-based call quotas.
+
+1. Register through [OneMap’s API documentation](https://www.onemap.gov.sg/apidocs/).
+2. Obtain an access token using its [authentication endpoint](https://www.onemap.gov.sg/apidocs/authentication) with your registered credentials in a POST body. Generate it locally; do not paste credentials or tokens into GitHub or chat.
+3. Copy `backend/.env.example` to `backend/.env`. Set `FAREWISE_ROUTING_PROVIDER=onemap` and `ONEMAP_TOKEN` to your token. This local file is ignored by Git.
+4. Restart `bash scripts/dev.sh`. This script reads `backend/.env`; a direct `go run ./cmd/server` requires you to export the variables yourself.
+5. Compare two different, road-accessible Singapore points. The summary should change to **Driving distance**, show journey time, and attribute OneMap / Singapore Land Authority. Simulated fares now use that road distance.
+
+OneMap tokens expire after three days and do not automatically renew. Generate a new token, update the local file and restart when access expires. This prototype stores only the token and does not retain account passwords or implement automatic authentication. See the [driving-route API](https://www.onemap.gov.sg/apidocs/routing) for the request/response contract. An authenticated live call has not been verified because no account/token has been supplied; the adapter is covered by local HTTP-server tests. Before reusing routing content in a future training dataset, review the chosen data source’s applicable reuse terms.
 
 ## API contract
 
 | Method | Endpoint | Response |
 | --- | --- | --- |
 | GET | `/api/health` | Service health and demo mode |
-| GET | `/api/locations` | Sample locations and their coordinates |
+| GET | `/api/locations` | Sample locations, coordinates and `routingSource` for disclosure |
 | POST | `/api/locations/current` | Validated device location, source `device`, and `persisted: false` |
 | POST | `/api/compare` | Resolved trip, quotes, source notice and timestamps |
 
@@ -405,7 +439,7 @@ The internal API now replaces `amountCents` with `fare` and quote-level `collect
 
 These two illustrative shapes show the value of a quote's `fare` property, not extra top-level response fields. Each quote also includes `productId`, `productType`, `fetchedAt` and `expiresAt`; the comparison's own timestamps remain separate.
 
-For a device pickup, use `pickupId: "current-location"` and add `pickupCoordinates: { "latitude": 1.36, "longitude": 103.989, "accuracyMeters": 12 }`. These example values are synthetic. After swapping, the device point uses `dropoffId: "current-location"` and `dropoffCoordinates` instead. Accuracy is optional; latitude and longitude are required. Never attach coordinates to a catalog ID.
+For a device pickup, use `pickupId: "current-location"` and add `pickupCoordinates: { "latitude": 1.36, "longitude": 103.989, "accuracyMeters": 12 }`. These example values are synthetic. For a device drop-off, use `dropoffId: "current-location"` and `dropoffCoordinates` instead. Both endpoints may use the same reserved ID with separate, different coordinate payloads. Accuracy is optional; latitude and longitude are required. Never attach coordinates to a catalog ID.
 
 ## Project structure
 
@@ -414,12 +448,15 @@ backend/
   cmd/server/main.go          HTTP startup, configuration and shutdown
   internal/api/               Routes, JSON handling and handler tests
   internal/fare/              Models, adapters, service and domain tests
+  internal/routing/           OneMap HTTP client, pacing, cooldown and tests
+  .env.example                Backend-only routing configuration template
 frontend/
   src/app/                    Next.js page, layout and responsive styles
-  src/components/             Icons and illustrative route graphic
+  src/components/             Icons and sourced route-distance summary
   src/lib/api.ts              Validated transport functions and fare formatting
   src/lib/contracts.ts        Response types and narrow runtime parsers
   src/lib/quote-view.ts       Category, ordering, range and expiry helpers
+  src/lib/trip-location.ts    Independent endpoint snapshots, swapping and equality
   src/lib/geolocation.ts      Browser permission and location-error handling
   tests/                      Geolocation, API contract and quote behavior tests
   next.config.ts              Same-origin proxy and watcher configuration
@@ -437,7 +474,10 @@ Farewise.code-workspace      Portable VS Code workspace
 - [x] Support batches, stable product IDs, fare ranges, partial fields and per-product expiry.
 - [ ] Map actual provider fee inclusions and product names; add model/feature version provenance.
 - [x] Add optional device geolocation with permission, validation, cancellation and manual fallback.
-- [ ] Add manual address search, geocoding and actual road routing.
+- [x] Integrate optional OneMap driving-route distance and duration with context cancellation and fake HTTP-server tests.
+- [ ] Configure a OneMap token and verify an authenticated live Singapore route.
+- [ ] Add manual address search and geocoding.
+- [ ] Add secure token renewal and a routing-cache policy after reviewing data reuse terms.
 - [x] Implement provider-specific rate limiting, bounded retries and a bounded short-TTL demo cache; test 429 behavior with a fake HTTP server.
 - [ ] Evaluate a calibrated algorithmic estimate provider, clearly separated from live quotes and demo prices.
 - [x] Bound provider concurrency and prove context cancellation with a real fake-server HTTP call.

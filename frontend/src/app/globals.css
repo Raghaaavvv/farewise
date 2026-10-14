@@ -442,6 +442,42 @@ h1 em {
   width: 100%;
   height: auto;
 }
+.route-summary {
+  padding: 20px;
+  background: #eaf0e9;
+}
+.route-summary-heading {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  font-size: 14px;
+}
+.route-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 20px 0;
+}
+.route-metrics > div {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.route-metrics strong {
+  font-size: 25px;
+}
+.route-metrics span,
+.route-summary p {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #42635a;
+}
+.route-summary a {
+  color: inherit;
+}
+.route-summary .route-stale {
+  font-weight: 600;
+}
 .map-caption {
   position: absolute;
   bottom: 10px;
@@ -1071,7 +1107,6 @@ dialog .compare-button {
   .panel-heading {
     margin-bottom: 15px;
   }
-  .route-preview,
   .catalog-note {
     display: none;
   }

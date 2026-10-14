@@ -7,7 +7,8 @@ import (
 
 // CurrentLocation validates coordinates supplied after browser permission.
 // The server cannot access browser GPS or display its permission prompt.
-// Coordinates are not persisted, reverse-geocoded or sent to third parties.
+// This endpoint does not persist or reverse-geocode coordinates. A subsequent
+// comparison sends its endpoints to OneMap when road routing is configured.
 func CurrentLocation(coordinates Coordinates) (Location, error) {
 	if coordinates.Latitude == nil || coordinates.Longitude == nil {
 		return Location{}, errors.New("latitude and longitude are required")

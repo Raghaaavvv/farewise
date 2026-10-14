@@ -9,6 +9,13 @@ export type Location = {
 };
 
 export type ProductType = "standard" | "premium" | "pool" | "taxi";
+export type RoutingSource = "approximate" | "onemap";
+export type Route = {
+  source: RoutingSource;
+  distanceMeters: number;
+  durationSeconds: number | null;
+  trafficAware: false;
+};
 export type FareRange = {
   minFare: number;
   maxFare: number;
@@ -43,6 +50,7 @@ export type Comparison = {
     rideType: "standard" | "six";
     scenario: "normal" | "busy" | "rain" | "outage";
     distanceKm: number;
+    route: Route;
   };
   quotes: Quote[];
   collectedAt: string;
@@ -211,6 +219,9 @@ export function parseComparison(value: unknown): Comparison {
   const collectedAt = timestamp(obj.collectedAt),
     expiresAt = timestamp(obj.expiresAt);
   if (Date.parse(expiresAt) <= Date.parse(collectedAt)) return fail();
+  const route = parseRoute(trip.route);
+  const distanceKm = number(trip.distanceKm, 0);
+  if (Math.abs(distanceKm - route.distanceMeters / 1000) > 1e-9) return fail();
   return {
     mode: choice(obj.mode, ["demo"]),
     notice: text(obj.notice),
@@ -220,11 +231,31 @@ export function parseComparison(value: unknown): Comparison {
       passengers,
       rideType,
       scenario: choice(trip.scenario, ["normal", "busy", "rain", "outage"]),
-      distanceKm: number(trip.distanceKm, 0),
+      distanceKm,
+      route,
     },
     quotes,
     collectedAt,
     expiresAt,
+  };
+}
+
+export function parseRoute(value: unknown): Route {
+  const obj = record(value);
+  const source = choice(obj.source, ["approximate", "onemap"]);
+  const durationSeconds =
+    obj.durationSeconds === null ? null : number(obj.durationSeconds, 0);
+  if (
+    obj.trafficAware !== false ||
+    (source === "onemap" && durationSeconds === null) ||
+    (source === "approximate" && durationSeconds !== null)
+  )
+    return fail();
+  return {
+    source,
+    distanceMeters: number(obj.distanceMeters, 0),
+    durationSeconds,
+    trafficAware: false,
   };
 }
 
@@ -235,7 +266,10 @@ export function parseLocations(value: unknown) {
     new Set(locations.map((location) => location.id)).size !== locations.length
   )
     return fail();
-  return { locations };
+  return {
+    locations,
+    routingSource: choice(obj.routingSource, ["approximate", "onemap"]),
+  };
 }
 
 export function parseCurrentLocation(value: unknown): {

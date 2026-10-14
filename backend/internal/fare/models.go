@@ -1,7 +1,10 @@
 // Package fare owns the trip and quote types, independent of HTTP or the UI.
 package fare
 
-import "time"
+import (
+	"farewise/backend/internal/routing"
+	"time"
+)
 
 type Location struct {
 	ID        string  `json:"id"`
@@ -51,12 +54,13 @@ type Coordinates struct {
 }
 
 type Trip struct {
-	Pickup     Location `json:"pickup"`
-	Dropoff    Location `json:"dropoff"`
-	Passengers int      `json:"passengers"`
-	RideType   string   `json:"rideType"`
-	Scenario   string   `json:"scenario"`
-	DistanceKM float64  `json:"distanceKm"`
+	Pickup     Location      `json:"pickup"`
+	Dropoff    Location      `json:"dropoff"`
+	Passengers int           `json:"passengers"`
+	RideType   string        `json:"rideType"`
+	Scenario   string        `json:"scenario"`
+	DistanceKM float64       `json:"distanceKm"`
+	Route      routing.Route `json:"route"`
 }
 
 type ProductType string

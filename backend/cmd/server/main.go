@@ -11,6 +11,7 @@ import (
 
 	"farewise/backend/internal/api"
 	"farewise/backend/internal/fare"
+	"farewise/backend/internal/routing"
 )
 
 func main() {
@@ -31,8 +32,24 @@ func main() {
 	}
 	// This total budget includes rate-limit waits, retries and adapter latency.
 	service := fare.NewService(providers, 5*time.Second, fare.WithMaxConcurrentProviders(4))
+	var options []api.Option
+	routingSource := "approximate"
+	switch mode := os.Getenv("FAREWISE_ROUTING_PROVIDER"); mode {
+	case "", "approximate":
+	case "onemap":
+		router, err := routing.NewOneMap(os.Getenv("ONEMAP_TOKEN"))
+		if err != nil {
+			logger.Error("routing.configuration", "error", err.Error())
+			os.Exit(1)
+		}
+		options = append(options, api.WithRouter(router))
+		routingSource = router.Source()
+	default:
+		logger.Error("routing.configuration", "error", "FAREWISE_ROUTING_PROVIDER must be approximate or onemap")
+		os.Exit(1)
+	}
 	server := &http.Server{
-		Addr: addr, Handler: api.NewHandler(service),
+		Addr: addr, Handler: api.NewHandler(service, options...),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
 		WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second,
 	}
@@ -46,7 +63,7 @@ func main() {
 			logger.Error("server.shutdown", "error", err.Error())
 		}
 	}()
-	logger.Info("server.start", "address", addr, "mode", "demo", "max_concurrent_providers", 4)
+	logger.Info("server.start", "address", addr, "mode", "demo", "routing_source", routingSource, "max_concurrent_providers", 4)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Error("server.failure", "error", err.Error())
 		os.Exit(1)

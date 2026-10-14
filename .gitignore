@@ -5,6 +5,8 @@ frontend/next-env.d.ts
 frontend/*.tsbuildinfo
 frontend/.env*
 backend/bin/
+backend/.env*
+!backend/.env.example
 .DS_Store
 *.log
 .env

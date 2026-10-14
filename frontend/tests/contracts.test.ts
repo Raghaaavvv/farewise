@@ -9,6 +9,8 @@ import {
 import {
   parseComparison,
   parseQuote,
+  parseRoute,
+  parseLocations,
   ResponseValidationError,
 } from "../src/lib/contracts";
 
@@ -56,6 +58,12 @@ function comparison(quotes: unknown[] = [quote()]) {
       rideType: "standard",
       scenario: "normal",
       distanceKm: 18.3,
+      route: {
+        source: "approximate",
+        distanceMeters: 18300,
+        durationSeconds: null,
+        trafficAware: false,
+      },
     },
     quotes,
     collectedAt: "2026-10-14T10:00:00Z",
@@ -217,4 +225,47 @@ test("comparison validates finite coordinates, passengers and collection expiry"
   ]) {
     assert.throws(() => parseComparison(value), ResponseValidationError);
   }
+});
+
+test("route contract distinguishes real driving distance from approximation", () => {
+  assert.deepEqual(
+    parseRoute({
+      source: "onemap",
+      distanceMeters: 23456,
+      durationSeconds: 1234.5,
+      trafficAware: false,
+    }),
+    {
+      source: "onemap",
+      distanceMeters: 23456,
+      durationSeconds: 1234.5,
+      trafficAware: false,
+    },
+  );
+  const route = comparison().trip.route;
+  for (const value of [
+    null,
+    { ...route, source: "unknown" },
+    { ...route, distanceMeters: -1 },
+    { ...route, distanceMeters: "18300" },
+    { ...route, source: "onemap" },
+    { ...route, durationSeconds: 100 },
+    { ...route, trafficAware: true },
+  ])
+    assert.throws(() => parseRoute(value), ResponseValidationError);
+  const valid = comparison();
+  assert.throws(
+    () =>
+      parseComparison({ ...valid, trip: { ...valid.trip, distanceKm: 20 } }),
+    ResponseValidationError,
+  );
+  assert.equal(
+    parseLocations({ locations: [location], routingSource: "onemap" })
+      .routingSource,
+    "onemap",
+  );
+  assert.throws(
+    () => parseLocations({ locations: [location], routingSource: "unknown" }),
+    ResponseValidationError,
+  );
 });

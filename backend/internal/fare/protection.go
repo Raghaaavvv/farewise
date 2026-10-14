@@ -96,10 +96,14 @@ func (p *ProtectedProvider) Name() string { return p.provider.Name() }
 // Direction, precise coordinates, product and all demo price inputs matter.
 // Hashing avoids retaining raw device coordinates in the cache keys.
 func tripCacheKey(t Trip) [32]byte {
-	return sha256.Sum256([]byte(fmt.Sprintf("%q|%.17g|%.17g|%q|%.17g|%.17g|%d|%q|%q|%.17g",
+	duration := "unknown"
+	if t.Route.DurationSeconds != nil {
+		duration = fmt.Sprintf("%.17g", *t.Route.DurationSeconds)
+	}
+	return sha256.Sum256([]byte(fmt.Sprintf("%q|%.17g|%.17g|%q|%.17g|%.17g|%d|%q|%q|%.17g|%q|%s|%t",
 		t.Pickup.ID, t.Pickup.Latitude, t.Pickup.Longitude,
 		t.Dropoff.ID, t.Dropoff.Latitude, t.Dropoff.Longitude,
-		t.Passengers, t.RideType, t.Scenario, t.DistanceKM)))
+		t.Passengers, t.RideType, t.Scenario, t.DistanceKM, t.Route.Source, duration, t.Route.TrafficAware)))
 }
 
 func (p *ProtectedProvider) Estimate(ctx context.Context, trip Trip) (quotes []Quote, err error) {
