@@ -1509,3 +1509,12 @@ dialog.destination-picker {
   pointer-events: none;
   opacity: 0.8;
 }
+
+.traffic-summary {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line, #e2e5e9);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.6);
+}
+.traffic-summary p { margin: 5px 0; }

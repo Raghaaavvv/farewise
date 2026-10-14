@@ -14,8 +14,25 @@ export type Route = {
   source: RoutingSource;
   distanceMeters: number;
   durationSeconds: number | null;
-  trafficAware: false;
+  trafficAware: boolean;
+  traffic?: TrafficEstimate;
 };
+export type TrafficEstimate = {
+  source: "lta";
+  status: "applied" | "unavailable" | "no_geometry" | "insufficient_coverage";
+  baselineSeconds: number;
+  estimatedSeconds: number | null;
+  minSeconds: number | null;
+  maxSeconds: number | null;
+  coverage: number;
+  matchedMeters: number;
+  matchedLinks: number;
+  observedAt: string | null;
+  fetchedAt: string | null;
+  expiresAt: string | null;
+  message: string;
+};
+
 export type FareRange = {
   minFare: number;
   maxFare: number;
@@ -240,22 +257,104 @@ export function parseComparison(value: unknown): Comparison {
   };
 }
 
+function parseTraffic(value: unknown, distance: number): TrafficEstimate {
+  const obj = record(value);
+  const status = choice(obj.status, [
+    "applied",
+    "unavailable",
+    "no_geometry",
+    "insufficient_coverage",
+  ]);
+  const nullableNumber = (v: unknown) =>
+    v === null ? null : number(v, 0, 86400);
+  const estimatedSeconds = nullableNumber(obj.estimatedSeconds);
+  const minSeconds = nullableNumber(obj.minSeconds);
+  const maxSeconds = nullableNumber(obj.maxSeconds);
+  const observedAt = obj.observedAt === null ? null : timestamp(obj.observedAt);
+  const fetchedAt = obj.fetchedAt === null ? null : timestamp(obj.fetchedAt);
+  const expiresAt = obj.expiresAt === null ? null : timestamp(obj.expiresAt);
+  const coverage = number(obj.coverage, 0, 1);
+  const matchedMeters = number(obj.matchedMeters, 0, distance);
+  const matchedLinks = integer(obj.matchedLinks, 0, 150000);
+  if (Math.abs(matchedMeters - distance * coverage) > 0.01) return fail();
+  if (
+    (observedAt === null) !== (fetchedAt === null) ||
+    (fetchedAt === null) !== (expiresAt === null)
+  )
+    return fail();
+  if (
+    fetchedAt &&
+    expiresAt &&
+    observedAt &&
+    (Date.parse(expiresAt) <= Date.parse(fetchedAt) ||
+      Date.parse(observedAt) > Date.parse(fetchedAt) + 60000)
+  )
+    return fail();
+  if (status === "applied") {
+    if (
+      coverage < 0.2 ||
+      matchedLinks < 1 ||
+      estimatedSeconds === null ||
+      minSeconds === null ||
+      maxSeconds === null ||
+      minSeconds > estimatedSeconds ||
+      estimatedSeconds > maxSeconds ||
+      observedAt === null
+    )
+      return fail();
+  } else if (
+    estimatedSeconds !== null ||
+    minSeconds !== null ||
+    maxSeconds !== null
+  )
+    return fail();
+  return {
+    source: choice(obj.source, ["lta"]),
+    status,
+    baselineSeconds: number(obj.baselineSeconds, 0),
+    estimatedSeconds,
+    minSeconds,
+    maxSeconds,
+    coverage,
+    matchedMeters,
+    matchedLinks,
+    observedAt,
+    fetchedAt,
+    expiresAt,
+    message: text(obj.message),
+  };
+}
+
 export function parseRoute(value: unknown): Route {
   const obj = record(value);
   const source = choice(obj.source, ["approximate", "onemap"]);
+  const distanceMeters = number(obj.distanceMeters, 0);
   const durationSeconds =
     obj.durationSeconds === null ? null : number(obj.durationSeconds, 0);
+  const trafficAware = boolean(obj.trafficAware);
+  const traffic =
+    obj.traffic === undefined
+      ? undefined
+      : parseTraffic(obj.traffic, distanceMeters);
   if (
-    obj.trafficAware !== false ||
     (source === "onemap" && durationSeconds === null) ||
-    (source === "approximate" && durationSeconds !== null)
+    (source === "approximate" &&
+      (durationSeconds !== null || trafficAware || traffic))
+  )
+    return fail();
+  if (trafficAware !== (traffic?.status === "applied")) return fail();
+  if (
+    traffic &&
+    durationSeconds !==
+      (trafficAware ? traffic.estimatedSeconds : traffic.baselineSeconds)
   )
     return fail();
   return {
     source,
-    distanceMeters: number(obj.distanceMeters, 0),
+    distanceMeters,
     durationSeconds,
-    trafficAware: false,
+    trafficAware,
+    ...(traffic ? { traffic } : {}),
   };
 }
 

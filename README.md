@@ -10,7 +10,7 @@ The current prototype demonstrates the complete frontend-to-backend comparison f
 
 ![Farewise OneMap destination picker](docs/images/map-picker.png)
 
-[View the iPhone map picker](docs/images/map-picker-iphone.png)
+[View the iPhone map picker](docs/images/map-picker-iphone.png) · [View the LTA traffic estimate](docs/images/traffic-iphone.png)
 
 ## What works today
 
@@ -18,8 +18,9 @@ The current prototype demonstrates the complete frontend-to-backend comparison f
 - Receive multiple products from one provider, with standard, premium, pool and taxi categories; filter categories without making another request.
 - Display exact fares or min/max ranges, preserve useful partial data, and show each product's expiry independently.
 - Choose pickup and destination from nine sample Singapore locations, or swap them.
-- Use **Use current location** separately for pickup or drop-off: request browser permission, validate the coordinates through Go, and preserve independent endpoint snapshots when swapping.
-- Fetch Singapore driving distance and estimated travel time from OneMap when configured; otherwise explicitly show approximate distance with no invented driving time. Fares remain simulated in both modes.
+- Use **Use current location** for pickup, or **Choose on map** for drop-off; validate coordinates through Go and preserve endpoint snapshots when swapping.
+- Fetch Singapore driving distance and baseline travel time from OneMap when configured; otherwise explicitly show approximate distance with no invented driving time. Fares remain simulated in both modes.
+- Optionally adjust driving time using fresh LTA Traffic Speed Bands, with route coverage, a heuristic time range, observation timestamps and explicit baseline fallbacks.
 - Select one to six passengers and standard or six-seater vehicles. More than four passengers automatically selects a six-seater.
 - Sort results by the lowest fare or soonest pickup.
 - Explore everyday, busy-hour, rainy-day and provider-failure scenarios.
@@ -43,7 +44,8 @@ Prices are deterministic for the same inputs. Refreshing within the cache window
 | **HTML, CSS and SVG** | Semantic controls, responsive layouts, icons and a sourced journey-distance summary |
 | **Leaflet 1.9.4** | Lazily loaded interactive OneMap destination picker with pan/zoom, draggable pins, keyboard selection and visible attribution |
 | **Python 3 (standard library)** | Optional local OneMap token setup and configuration tests; not a fare model |
-| **OneMap REST API** | Optional Singapore driving-route distance and duration, called only from Go with a backend token |
+| **OneMap REST API** | Optional Singapore driving-route distance, baseline duration and backend-only encoded route geometry |
+| **LTA DataMall API** | Optional paginated Traffic Speed Bands snapshots, cached in memory and matched to the chosen route |
 | **pnpm** | Frontend dependency management and reproducible lockfile-based installs |
 | **Prettier** | Frontend source formatting |
 | **Go `testing` / `httptest`** | Unit and HTTP handler tests without external test dependencies |
@@ -64,7 +66,13 @@ flowchart TD
     F --> Y{Routing configuration}
     Y -->|OneMap enabled| Z[One driving-route request: distance and duration]
     Y -->|Offline demo| AA[Labelled Haversine approximation]
-    Z -->|Success| G[Comparison service]
+    Z -->|Success| LT{Fresh LTA snapshot available?}
+    LT -->|Yes| LM[Match directional road links; replace time over covered portions]
+    LT -->|No| LB[Explicit OneMap baseline fallback]
+    LM --> G[Comparison service]
+    LB --> G
+    LW[One cancellable background worker: paginated LTA speed feed] --> LC[Bounded in-memory snapshot cache]
+    LC -.-> LT
     Z -->|Failure| AB[Return routing error without estimating fares]
     AA --> G
     G --> H[Bounded workers and shared provider semaphore]
@@ -287,7 +295,7 @@ bash scripts/check.sh
 
 This runs the local Python token-setup tests, Go tests with the race detector, `go vet`, frontend location/API unit tests, TypeScript checks and a production Next.js build. GitHub Actions runs the equivalent checks on pushes and pull requests. The Go workflow checks both the supported minimum version and the current development version.
 
-The 29 frontend tests cover synthetic geolocation and coordinate requests, runtime response validation (including malformed successful responses), category filtering, product identity, missing ETAs, range display, overlapping ranges, per-product expiry, independent endpoint capture/swapping, map bounds/precision/provenance, map-confirmation cancellation and routing contract validation. Run them with `pnpm test` from `frontend/`. They do not read anyone's real location or display a real permission prompt.
+The 32 frontend tests cover synthetic geolocation and coordinate requests, runtime response validation (including malformed successful responses), category filtering, product identity, missing ETAs, range display, overlapping ranges, per-product expiry, independent endpoint capture/swapping, map bounds/precision/provenance, map-confirmation cancellation and routing/traffic contract validation (including contradictory coverage and ranges). Run them with `pnpm test` from `frontend/`. They do not read anyone's real location or display a real permission prompt.
 
 TypeScript checking and a production build are static/build checks. Domain helpers and API boundaries have behavioral unit tests, but a repeatable full browser suite remains a future improvement. Category filtering, multiple products, partial ETA display and product expiry were also checked in the local browser, along with a 390-pixel iPhone layout with no horizontal overflow. The current screenshots show the interactive destination picker and a comparison using real OneMap route distance/time with simulated fares. The map dialog and journey summary are checked at a 390-pixel iPhone width without horizontal overflow.
 
@@ -400,6 +408,8 @@ This exposes the development frontend to the local network. The Go API can remai
 | `API_BASE_URL` | `http://127.0.0.1:8080` | Next.js server-side API proxy target; set before startup |
 | `FAREWISE_ROUTING_PROVIDER` | `approximate` | `approximate` uses offline demo distance; `onemap` requests Singapore driving routes |
 | `ONEMAP_TOKEN` | unset | Backend-only OneMap access token, required in `onemap` mode |
+| `FAREWISE_TRAFFIC_PROVIDER` | `off` in template | `lta` enables the background speed collector; requires OneMap. If absent, a configured LTA key enables traffic automatically |
+| `LTA_ACCOUNT_KEY` | unset | DataMall **API** account key sent in the `AccountKey` header; separate from OneMap and any SDK key |
 | `WATCHPACK_POLLING` | `1000` during development | Polling interval in milliseconds |
 
 No ride-provider keys are required. Routing defaults to offline mode and makes no OneMap requests. Backend startup fails clearly when `onemap` is selected without a token or a routing mode is misspelled. Never use a `NEXT_PUBLIC_` variable for tokens.
@@ -424,9 +434,42 @@ Confirmation validates the coordinate pair through `POST /api/locations/map`, wi
 
 Basemap display and road routing are separate: the map picker works without an access token, while driving distance/time requires the backend token. In approximate mode the map is real, but the journey distance is still explicitly an approximation and fares are simulated.
 
-### Future traffic features
+### LTA traffic-adjusted driving time
 
-[LTA’s Traffic Images dataset](https://data.gov.sg/datasets/d_6cdb6b405b25aaaacbaf7689bcc6fae0/view) provides camera images and metadata. Its documented endpoint is `GET https://api.data.gov.sg/v1/transport/traffic-images`; the published API description recommends requesting once per minute, despite source retrieval every 20 seconds. A data.gov.sg key is optional for testing and gives higher limits. Camera images need further processing to become useful congestion features, and are not route travel-time measurements. This feed has not been integrated into Farewise or used to train a model.
+Register for a DataMall **API account key** at [LTA API access](https://datamall.lta.gov.sg/content/datamall/en/request-for-api.html). Keep a separately issued SDK key separate. Add these settings to ignored `backend/.env`, then restart `bash scripts/dev.sh`:
+
+```dotenv
+FAREWISE_ROUTING_PROVIDER=onemap
+ONEMAP_TOKEN=your-local-onemap-token
+FAREWISE_TRAFFIC_PROVIDER=lta
+LTA_ACCOUNT_KEY=your-local-api-account-key
+```
+
+The backend uses `GET https://datamall2.mytransport.sg/ltaodataservice/v4/TrafficSpeedBands`, with the key only in the HTTPS `AccountKey` header. The [LTA API guide](https://datamall.lta.gov.sg/content/dam/datamall/datasets/LTA_DataMall_API_User_Guide.pdf) documents a five-minute update interval and 500-row pagination using `$skip`. The live feed mixes numeric strings and numbers, and pages may have different `lastUpdatedTime` values; the parser handles both numeric forms and page-specific Singapore timestamps.
+
+One worker starts when the configured backend starts, collecting at most 300 pages / 150,000 rows with 200 ms between sequential pages, a five-second HTTP timeout and a 120-second collection budget. These are our own application limits, not a claim about LTA's allowed quota. Failed or incomplete collections are never published. The worker respects `Retry-After`, waits at least one minute after failures, never forwards credentials across redirects and cancels on server shutdown. Comparisons do not wait for collection: while warming up they return OneMap's baseline with an explicit traffic status. No separate scheduled task or persistent collector runs after the backend stops.
+
+Only valid page observations younger than ten minutes are collected. When collection finishes, observations older than eight minutes are discarded to leave at least two minutes of freshness for use. Duplicate road IDs prefer newer page observations. A complete collection replaces the previous immutable snapshot, kept only in bounded process memory for at most five minutes or until its oldest retained observation reaches ten minutes. The worker starts refreshing up to two minutes before snapshot expiry while comparisons can still use the previous valid snapshot. Expired observations are never used to adjust time. The reported `observedAt` is the **oldest retained page observation**, not a per-road measurement timestamp. Refresh gaps and source failures can therefore produce baseline results. No traffic history, route geometry or user coordinates are saved to disk. Matching is bounded by two million grid entries and 20,000 route samples per comparison.
+
+The prototype estimates time over **OneMap's chosen route**; it does not search for a faster route:
+
+1. Decode OneMap's precision-5 polyline internally and check its geometric length against reported road distance.
+2. Index LTA road links into a bounded spatial grid. Sample the route at intervals no longer than 25 m, matching a nearby link within 30 m, with direction cosine at least 0.85 and projection within the link's endpoints.
+3. Scale sampled distances to OneMap's reported distance. Use the band midpoint for the point estimate and band endpoints for a heuristic range. A 2 km/h floor keeps zero-speed lower bounds finite; this is a crawl-speed assumption, not a measured queue-delay model.
+4. Replace the baseline time assigned to matched route portions; retain baseline time for unmatched portions. Do **not** add a whole expressway's duration to the existing total. Baseline time is apportioned uniformly by distance because segment-level baseline times are not available in the current adapter.
+5. Apply the adjustment only when at least 20% of route distance has a fresh directional match. Below that threshold, use the baseline and expose insufficient coverage.
+
+The response adds `trip.route.traffic`: source/status, baseline and adjusted seconds, min/max seconds, coverage, matched distance/link count, timestamps and a message. `durationSeconds` contains the adjusted point estimate only when `trafficAware=true`; otherwise it retains the baseline. Geometry remains backend-only. Frontend runtime validation checks coherent ranges, provenance, timestamps and coverage before rendering.
+
+**Accuracy limits:** nearest-link matching can confuse nearby parallel roads, and speed bands do not model all signals, junction queues or future traffic changes. The range is not a statistical confidence interval. Coverage is a matching metric, not validated accuracy. This is an uncalibrated traffic-time estimator and must be evaluated against observed trip durations before claiming accurate ETAs. Fare formulas and pickup ETAs remain simulated and do not yet use a trained model.
+
+Tests exercise pagination, mixed number formats, shared refreshes, expiry, per-page freshness, 429 cooldown, redirect protection, real HTTP cancellation and worker shutdown. Geometry tests reject reverse-direction, crossing, distant and sparse links, verify covered-time replacement without double counting, and check finite crawl-speed bounds. API tests verify adjusted time reaches every provider and the comparison response; frontend tests reject contradictory traffic contracts.
+
+An authenticated public sample was verified on **14 October 2026**: the Changi-to-Orchard route was 23.57 km, with a OneMap baseline of 1,883 s. LTA matched approximately 77.5% / 191 road links and yielded a point estimate of 1,789.1 s (29.8 min), with heuristic bounds of 1,653.0–1,977.0 s (27.6–33.0 min). Two cached-snapshot comparisons took approximately 0.57 s and 0.13 s on this development machine; these are sample observations, not a load-test benchmark or guaranteed future values. All fare sources remained `simulated`. Full startup collection took approximately 81–103 seconds in this environment, so the UI offers baseline time while warming.
+
+### Future traffic sources
+
+Estimated expressway travel times and traffic incidents remain future additions; no fabricated incident delay is added now. [Traffic Images](https://data.gov.sg/datasets/d_6cdb6b405b25aaaacbaf7689bcc6fae0/view) remain unintegrated: camera images require additional processing to become congestion features. No forecasting model or training dataset has been built.
 
 ## API contract
 
@@ -472,7 +515,7 @@ backend/
   cmd/server/main.go          HTTP startup, configuration and shutdown
   internal/api/               Routes, JSON handling and handler tests
   internal/fare/              Models, adapters, service and domain tests
-  internal/routing/           OneMap HTTP client, pacing, cooldown and tests
+  internal/routing/           OneMap geometry, LTA snapshot worker, traffic estimator and tests
   .env.example                Backend-only routing configuration template
 frontend/
   src/app/                    Next.js page, layout and responsive styles
@@ -500,6 +543,7 @@ Farewise.code-workspace      Portable VS Code workspace
 - [ ] Map actual provider fee inclusions and product names; add model/feature version provenance.
 - [x] Add optional device geolocation with permission, validation, cancellation and manual fallback.
 - [x] Integrate optional OneMap driving-route distance and duration with context cancellation and fake HTTP-server tests.
+- [x] Add optional LTA speed-band collection, directional route matching and transparent traffic-time ranges against synthetic HTTP servers.
 - [x] Configure a local OneMap token and verify authenticated catalog and map-selected routes.
 - [x] Add an interactive OneMap destination picker with coordinate validation, cancellation and attribution.
 - [ ] Add manual address search and geocoding.

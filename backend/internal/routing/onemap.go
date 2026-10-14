@@ -22,6 +22,9 @@ type Route struct {
 	DistanceMeters  float64  `json:"distanceMeters"`
 	DurationSeconds *float64 `json:"durationSeconds"`
 	TrafficAware    bool     `json:"trafficAware"`
+	// Geometry is used only inside the backend; never returned or persisted.
+	Geometry []Point          `json:"-"`
+	Traffic  *TrafficEstimate `json:"traffic,omitempty"`
 }
 
 type Router interface {
@@ -139,8 +142,9 @@ func (o *OneMap) DrivingRoute(ctx context.Context, origin, destination Point) (R
 		return Route{}, failure
 	}
 	var body struct {
-		Status  *int `json:"status"`
-		Summary *struct {
+		Geometry string `json:"route_geometry"`
+		Status   *int   `json:"status"`
+		Summary  *struct {
 			Distance *float64 `json:"total_distance"`
 			Duration *float64 `json:"total_time"`
 		} `json:"route_summary"`
@@ -170,7 +174,8 @@ func (o *OneMap) DrivingRoute(ctx context.Context, origin, destination Point) (R
 	if body.Summary == nil || !validValue(body.Summary.Distance) || !validValue(body.Summary.Duration) {
 		return Route{}, invalidResponse()
 	}
-	return Route{Source: "onemap", DistanceMeters: *body.Summary.Distance, DurationSeconds: body.Summary.Duration, TrafficAware: false}, nil
+	geometry, _ := decodePolyline(body.Geometry)
+	return Route{Source: "onemap", DistanceMeters: *body.Summary.Distance, DurationSeconds: body.Summary.Duration, Geometry: geometry}, nil
 }
 
 func pointString(p Point) string {

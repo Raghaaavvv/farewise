@@ -32,6 +32,8 @@ func main() {
 	}
 	// This total budget includes rate-limit waits, retries and adapter latency.
 	service := fare.NewService(providers, 5*time.Second, fare.WithMaxConcurrentProviders(4))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	var options []api.Option
 	routingSource := "approximate"
 	switch mode := os.Getenv("FAREWISE_ROUTING_PROVIDER"); mode {
@@ -48,13 +50,33 @@ func main() {
 		logger.Error("routing.configuration", "error", "FAREWISE_ROUTING_PROVIDER must be approximate or onemap")
 		os.Exit(1)
 	}
+	trafficMode := os.Getenv("FAREWISE_TRAFFIC_PROVIDER")
+	if trafficMode == "" && os.Getenv("LTA_ACCOUNT_KEY") != "" {
+		trafficMode = "lta"
+	}
+	switch trafficMode {
+	case "", "off":
+	case "lta":
+		if routingSource != "onemap" {
+			logger.Error("traffic.configuration", "error", "LTA traffic requires OneMap routing")
+			os.Exit(1)
+		}
+		traffic, err := routing.NewLTA(os.Getenv("LTA_ACCOUNT_KEY"))
+		if err != nil {
+			logger.Error("traffic.configuration", "error", err.Error())
+			os.Exit(1)
+		}
+		options = append(options, api.WithTraffic(traffic))
+		go traffic.Run(ctx)
+	default:
+		logger.Error("traffic.configuration", "error", "FAREWISE_TRAFFIC_PROVIDER must be off or lta")
+		os.Exit(1)
+	}
 	server := &http.Server{
 		Addr: addr, Handler: api.NewHandler(service, options...),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
-		WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second,
+		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -63,7 +85,7 @@ func main() {
 			logger.Error("server.shutdown", "error", err.Error())
 		}
 	}()
-	logger.Info("server.start", "address", addr, "mode", "demo", "routing_source", routingSource, "max_concurrent_providers", 4)
+	logger.Info("server.start", "address", addr, "mode", "demo", "routing_source", routingSource, "traffic_source", trafficMode, "max_concurrent_providers", 4)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Error("server.failure", "error", err.Error())
 		os.Exit(1)

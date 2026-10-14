@@ -10,6 +10,9 @@ export function RoutePreview({
   loading: boolean;
   dirty: boolean;
 }) {
+  const traffic = route?.traffic;
+  const trafficExpired =
+    !!traffic?.expiresAt && Date.parse(traffic.expiresAt) <= Date.now();
   return (
     <div
       className="route-preview route-summary"
@@ -41,13 +44,52 @@ export function RoutePreview({
                   ? "—"
                   : `${Math.ceil(route.durationSeconds / 60)} min`}
               </strong>
-              <span>Estimated driving time</span>
+              <span>
+                {route.trafficAware
+                  ? trafficExpired
+                    ? "Previous traffic estimate"
+                    : "Traffic-adjusted estimate"
+                  : "Baseline driving time"}
+              </span>
             </div>
           </div>
           {dirty && (
             <p className="route-stale">
               Previous trip · compare again to update.
             </p>
+          )}
+          {traffic && (
+            <div className="traffic-summary" aria-label="LTA traffic estimate">
+              {traffic.status === "applied" &&
+                traffic.minSeconds !== null &&
+                traffic.maxSeconds !== null && (
+                  <p>
+                    <strong>
+                      {Math.floor(traffic.minSeconds / 60)}–
+                      {Math.ceil(traffic.maxSeconds / 60)} min
+                    </strong>{" "}
+                    speed-band range · OneMap baseline{" "}
+                    {Math.ceil(traffic.baselineSeconds / 60)} min
+                  </p>
+                )}
+              {traffic.observedAt && (
+                <p>
+                  Oldest LTA observation{" "}
+                  {new Intl.DateTimeFormat("en-SG", {
+                    timeZone: "Asia/Singapore",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    hour12: false,
+                  }).format(new Date(traffic.observedAt))}{" "}
+                  SGT · {Math.round(traffic.coverage * 100)}% of route matched.
+                </p>
+              )}
+              <p>
+                {trafficExpired
+                  ? "Traffic observations expired. Compare again to refresh."
+                  : traffic.message}
+              </p>
+            </div>
           )}
           {route.source === "onemap" ? (
             <p>
@@ -59,8 +101,21 @@ export function RoutePreview({
               >
                 OneMap / Singapore Land Authority
               </a>
-              . Travel time does not include waiting for pickup; live traffic is
-              not included.
+              {traffic && (
+                <>
+                  {" "}
+                  · Traffic data:{" "}
+                  <a
+                    href="https://datamall.lta.gov.sg/"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    LTA DataMall
+                  </a>
+                </>
+              )}
+              . Driving time excludes waiting for pickup.
+              {!route.trafficAware && " Live traffic has not been applied."}
             </p>
           ) : (
             <p>

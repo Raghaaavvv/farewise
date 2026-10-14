@@ -120,3 +120,34 @@ func TestInvalidTripsAndLocationCaptureDoNotCallRouter(t *testing.T) {
 		t.Fatal("location capture contacted router")
 	}
 }
+
+type fakeTraffic struct{ calls int }
+
+func (f *fakeTraffic) Enrich(ctx context.Context, route routing.Route) routing.Route {
+	f.calls++
+	baseline := *route.DurationSeconds
+	adjusted, min, max := 1500.0, 1400.0, 1700.0
+	route.DurationSeconds = &adjusted
+	route.TrafficAware = true
+	route.Traffic = &routing.TrafficEstimate{Source: "lta", Status: "applied", BaselineSeconds: baseline, EstimatedSeconds: &adjusted, MinSeconds: &min, MaxSeconds: &max, Coverage: .5, MatchedMeters: route.DistanceMeters * .5, MatchedLinks: 1}
+	return route
+}
+func TestTrafficAdjustedTimeFlowsThroughComparison(t *testing.T) {
+	seconds := 1200.0
+	router := &fakeRouter{route: routing.Route{Source: "onemap", DistanceMeters: 10000, DurationSeconds: &seconds}}
+	traffic := &fakeTraffic{}
+	provider := &distanceProvider{id: "a"}
+	handler := NewHandler(fare.NewService([]fare.Provider{provider}, time.Second), WithRouter(router), WithTraffic(traffic))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest("POST", "/api/compare", bytes.NewBufferString(deviceTrip)))
+	var result fare.Comparison
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != 200 || traffic.calls != 1 || provider.calls != 1 || *provider.trip.Route.DurationSeconds != 1500 || result.Trip.Route.Traffic.BaselineSeconds != 1200 || !result.Trip.Route.TrafficAware {
+		t.Fatal("traffic result lost at API/provider boundary")
+	}
+	if bytes.Contains(recorder.Body.Bytes(), []byte("Geometry")) {
+		t.Fatal("internal route geometry leaked")
+	}
+}

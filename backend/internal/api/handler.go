@@ -15,7 +15,14 @@ import (
 )
 
 type Option func(*handlerConfig)
-type handlerConfig struct{ router routing.Router }
+type handlerConfig struct {
+	router  routing.Router
+	traffic routing.TrafficEnricher
+}
+
+func WithTraffic(traffic routing.TrafficEnricher) Option {
+	return func(c *handlerConfig) { c.traffic = traffic }
+}
 
 func WithRouter(router routing.Router) Option { return func(c *handlerConfig) { c.router = router } }
 
@@ -105,6 +112,12 @@ func NewHandler(service *fare.Service, options ...Option) http.Handler {
 				}
 				writeJSON(w, status, map[string]string{"error": message})
 				return
+			}
+			if config.traffic != nil {
+				route = config.traffic.Enrich(r.Context(), route)
+				if r.Context().Err() != nil {
+					return
+				}
 			}
 			trip.Route, trip.DistanceKM = route, route.DistanceMeters/1000
 		}

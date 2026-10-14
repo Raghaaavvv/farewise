@@ -858,6 +858,9 @@ export default function Home() {
               configured, the comparison uses a driving route’s distance and
               travel time. Otherwise it uses an explicitly labelled approximate
               distance. Driving time is separate from simulated time to pickup.
+              When LTA traffic is configured, matched road speeds produce an
+              approximate time range with coverage and observation timestamps.
+              The selected route is not re-optimised for traffic.
             </p>
           </>
         ) : (
