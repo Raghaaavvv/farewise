@@ -5,14 +5,18 @@ export function RoutePreview({
   route,
   loading,
   dirty,
+  historical = false,
 }: {
   route?: Route;
   loading: boolean;
   dirty: boolean;
+  historical?: boolean;
 }) {
   const traffic = route?.traffic;
   const trafficExpired =
-    !!traffic?.expiresAt && Date.parse(traffic.expiresAt) <= Date.now();
+    !historical &&
+    !!traffic?.expiresAt &&
+    Date.parse(traffic.expiresAt) <= Date.now();
   return (
     <div
       className="route-preview route-summary"
@@ -46,10 +50,14 @@ export function RoutePreview({
               </strong>
               <span>
                 {route.trafficAware
-                  ? trafficExpired
-                    ? "Previous traffic estimate"
-                    : "Traffic-adjusted estimate"
-                  : "Baseline driving time"}
+                  ? historical
+                    ? "Captured traffic estimate"
+                    : trafficExpired
+                      ? "Previous traffic estimate"
+                      : "Traffic-adjusted estimate"
+                  : historical
+                    ? "Captured baseline time"
+                    : "Baseline driving time"}
               </span>
             </div>
           </div>

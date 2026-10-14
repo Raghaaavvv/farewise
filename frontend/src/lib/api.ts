@@ -40,7 +40,7 @@ export const initialTrip: TripRequest = {
   scenario: "normal",
 };
 
-async function request<T>(
+export async function request<T>(
   path: string,
   parse: (value: unknown) => T,
   init: RequestInit = {},

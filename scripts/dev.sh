@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(dirname "$0")/toolchain.sh"
+if [ -f "$PROJECT_ROOT/backend/db.env" ]; then bash "$PROJECT_ROOT/scripts/db.sh" up; fi
 cd "$PROJECT_ROOT/frontend"
 if [ ! -d node_modules ]; then pnpm install --frozen-lockfile; fi
 cleanup() {
@@ -11,6 +12,7 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 # Run the built binary directly, so stopping this script stops the actual API.
 cd "$PROJECT_ROOT/backend"
+if [ -f db.env ]; then set -a; source db.env; set +a; fi
 if [ -f .env ]; then
   set -a
   source .env

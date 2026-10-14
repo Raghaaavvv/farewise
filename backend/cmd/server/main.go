@@ -11,6 +11,7 @@ import (
 
 	"farewise/backend/internal/api"
 	"farewise/backend/internal/fare"
+	"farewise/backend/internal/observations"
 	"farewise/backend/internal/routing"
 )
 
@@ -35,6 +36,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var options []api.Option
+	if databaseURL := os.Getenv("DATABASE_URL"); databaseURL != "" {
+		setup, cancel := context.WithTimeout(ctx, 10*time.Second)
+		repo, err := observations.Open(setup, databaseURL)
+		cancel()
+		if err != nil {
+			logger.Error("observations.configuration", "error", err.Error())
+			os.Exit(1)
+		}
+		defer repo.Close()
+		options = append(options, api.WithObservations(repo))
+	}
 	routingSource := "approximate"
 	switch mode := os.Getenv("FAREWISE_ROUTING_PROVIDER"); mode {
 	case "", "approximate":

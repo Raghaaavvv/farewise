@@ -11,13 +11,15 @@ import (
 	"time"
 
 	"farewise/backend/internal/fare"
+	"farewise/backend/internal/observations"
 	"farewise/backend/internal/routing"
 )
 
 type Option func(*handlerConfig)
 type handlerConfig struct {
-	router  routing.Router
-	traffic routing.TrafficEnricher
+	router       routing.Router
+	traffic      routing.TrafficEnricher
+	observations observations.Repository
 }
 
 func WithTraffic(traffic routing.TrafficEnricher) Option {
@@ -84,45 +86,16 @@ func NewHandler(service *fare.Service, options ...Option) http.Handler {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		if config.router != nil {
-			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-			started := time.Now()
-			route, routeErr := config.router.DrivingRoute(ctx,
-				routing.Point{Latitude: trip.Pickup.Latitude, Longitude: trip.Pickup.Longitude},
-				routing.Point{Latitude: trip.Dropoff.Latitude, Longitude: trip.Dropoff.Longitude})
-			cancel()
-			slog.Info("routing.result", "source", routingSource, "latency_ms", time.Since(started).Milliseconds(), "success", routeErr == nil)
-			if routeErr != nil {
-				if r.Context().Err() != nil {
-					return
-				}
-				status, message := http.StatusBadGateway, "Could not retrieve the driving route. Try again."
-				var failure *routing.Error
-				if errors.As(routeErr, &failure) {
-					status, message = failure.Status, failure.Message
-					if failure.RetryAfter > 0 {
-						seconds := int64(failure.RetryAfter / time.Second)
-						if failure.RetryAfter%time.Second != 0 {
-							seconds++
-						}
-						w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
-					}
-				} else if errors.Is(routeErr, context.DeadlineExceeded) {
-					status, message = http.StatusGatewayTimeout, "Driving route lookup timed out. Try again."
-				}
-				writeJSON(w, status, map[string]string{"error": message})
-				return
+		trip, err = config.withRoute(r.Context(), trip)
+		if err != nil {
+			if r.Context().Err() == nil {
+				routingFailure(w, err)
 			}
-			if config.traffic != nil {
-				route = config.traffic.Enrich(r.Context(), route)
-				if r.Context().Err() != nil {
-					return
-				}
-			}
-			trip.Route, trip.DistanceKM = route, route.DistanceMeters/1000
+			return
 		}
 		writeJSON(w, http.StatusOK, service.Compare(r.Context(), trip))
 	})
+	config.registerObservations(mux, service)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -134,4 +107,43 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func (config handlerConfig) withRoute(parent context.Context, trip fare.Trip) (fare.Trip, error) {
+	if config.router == nil {
+		return trip, nil
+	}
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+	defer cancel()
+	started := time.Now()
+	route, err := config.router.DrivingRoute(ctx, routing.Point{Latitude: trip.Pickup.Latitude, Longitude: trip.Pickup.Longitude}, routing.Point{Latitude: trip.Dropoff.Latitude, Longitude: trip.Dropoff.Longitude})
+	slog.Info("routing.result", "source", config.router.Source(), "latency_ms", time.Since(started).Milliseconds(), "success", err == nil)
+	if err != nil {
+		return trip, err
+	}
+	if config.traffic != nil {
+		route = config.traffic.Enrich(parent, route)
+		if parent.Err() != nil {
+			return trip, parent.Err()
+		}
+	}
+	trip.Route, trip.DistanceKM = route, route.DistanceMeters/1000
+	return trip, nil
+}
+func routingFailure(w http.ResponseWriter, err error) {
+	status, message := http.StatusBadGateway, "Could not retrieve the driving route. Try again."
+	var failure *routing.Error
+	if errors.As(err, &failure) {
+		status, message = failure.Status, failure.Message
+		if failure.RetryAfter > 0 {
+			seconds := int64(failure.RetryAfter / time.Second)
+			if failure.RetryAfter%time.Second != 0 {
+				seconds++
+			}
+			w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+		}
+	} else if errors.Is(err, context.DeadlineExceeded) {
+		status, message = http.StatusGatewayTimeout, "Driving route lookup timed out. Try again."
+	}
+	writeJSON(w, status, map[string]string{"error": message})
 }

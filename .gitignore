@@ -14,3 +14,10 @@ backend/.env*
 # Python setup helper caches
 __pycache__/
 *.pyc
+
+# Private PostgreSQL settings, exports and backups
+backend/db.env
+backend/db.env.*
+exports/
+backups/
+*.dump

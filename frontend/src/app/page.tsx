@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import dynamic from "next/dynamic";
+import Link from "next/link";
 import {
   compareTrip,
   fetchLocations,
@@ -243,6 +244,19 @@ export default function Home() {
       rideType: value > 4 ? "six" : t.rideType,
     }));
 
+  function logRealFare() {
+    if (!comparedTrip || !comparison || dirty) return;
+    sessionStorage.setItem(
+      "farewise-observation-draft",
+      JSON.stringify({
+        trip: comparedTrip,
+        pickupLabel: comparison.trip.pickup.name,
+        dropoffLabel: comparison.trip.dropoff.name,
+      }),
+    );
+    window.location.assign("/observations");
+  }
+
   return (
     <>
       <header className="site-header">
@@ -253,6 +267,9 @@ export default function Home() {
           farewise<span className="brand-dot">.</span>
         </a>
         <nav aria-label="Main navigation">
+          <Link className="text-button" href="/observations">
+            Observations
+          </Link>
           <span className="location-tag">
             <span className="status-dot" />
             Singapore
@@ -456,7 +473,8 @@ export default function Home() {
                 <p className="location-privacy">
                   GPS permission is requested only by “Use current location”.
                   Confirmed coordinates are sent to this app and aren’t written
-                  to disk.
+                  to disk during comparison. Capturing a trip in the observation
+                  logger saves its coordinates in your local database.
                   {routingSource === "onemap" &&
                     " Comparing sends both locations to OneMap to calculate a driving route."}
                 </p>
@@ -518,6 +536,20 @@ export default function Home() {
                 <Icon name="check" size={13} /> No booking or payment required
               </p>
             </form>
+            <div className="observation-entry">
+              <button
+                type="button"
+                className="use-location-button"
+                disabled={loading || dirty || !comparison}
+                onClick={logRealFare}
+              >
+                Log a real fare for this trip
+              </button>
+              <p>
+                Capture this trip in your local database, then enter the fare
+                shown in a provider app.
+              </p>
+            </div>
             <RoutePreview
               route={comparison?.trip.route}
               loading={loading}

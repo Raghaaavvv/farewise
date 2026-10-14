@@ -10,7 +10,20 @@ The current prototype demonstrates the complete frontend-to-backend comparison f
 
 ![Farewise OneMap destination picker](docs/images/map-picker.png)
 
-[View the iPhone map picker](docs/images/map-picker-iphone.png) · [View the LTA traffic estimate](docs/images/traffic-iphone.png)
+[View the iPhone map picker](docs/images/map-picker-iphone.png) · [View the LTA traffic estimate](docs/images/traffic-iphone.png) · [View the observation dashboard](docs/images/observations.png)
+
+## Observation logger: get started
+
+Install and start [Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/), then from the project folder run:
+
+```bash
+bash scripts/db.sh up
+bash scripts/dev.sh
+```
+
+Open **http://localhost:3000/observations** or the **Observations** navigation tab. Choose the same trip used in the provider app, click **Capture trip conditions**, check the provider's displayed fare, enter its exact product, price and observation time, then save. The logger makes no requests to ride-hailing providers. Comparison fares remain simulated.
+
+`db.sh up` creates owner-only, ignored `backend/db.env` with a generated local password, starts a PostgreSQL 17 container, binds it only to `127.0.0.1:55432`, waits for health, and preserves data in Docker's named `farewise_observation-data` volume. The backend automatically applies embedded, checksummed migrations under an advisory lock. Go 1.25+ is required by the pinned pgx driver. `dev.sh` starts the existing database when local database settings exist and loads those settings without changing your OneMap/LTA tokens. An older running backend needs a restart to expose the new routes.
 
 ## What works today
 
@@ -29,6 +42,7 @@ The current prototype demonstrates the complete frontend-to-backend comparison f
 - Protect each demo provider with a token bucket, a 30-second success cache, shared in-progress lookups and bounded retries.
 - Bound provider evaluations across simultaneous comparisons, validate API responses at runtime, and emit structured provider logs.
 - Use a responsive interface on desktop or iPhone.
+- Capture immutable trip/traffic snapshots, enter real provider quotes or paid fares manually, correct observations with revision checks, inspect provider/weekday/time coverage, and export a CSV for research.
 
 Prices are deterministic for the same inputs. Refreshing within the cache window reuses complete successful product batches and their original timestamps; cache entries expire after at most 30 seconds, or sooner when any product expires. Demo product lifetimes intentionally vary from 40 to 120 seconds. The rainy-day Gojek demo omits its pickup ETA to exercise partial data. All vehicles, tiers and service labels are illustrative, rather than verified provider products.
 
@@ -37,6 +51,8 @@ Prices are deterministic for the same inputs. Refreshing within the cache window
 | Technology | Role in the project |
 | --- | --- |
 | **Go** | Backend domain models, HTTP API, comparison service, concurrency and tests |
+| **PostgreSQL 17 + pgx v5** | Persistent observation sessions and fare records, relational constraints, JSONB snapshots, pooled connections and parameterised SQL |
+| **Docker Compose** | Reproducible, digest-pinned PostgreSQL container, local-only port, health check and persistent named volume |
 | **Go `net/http`** | Method-based routing, request decoding, response handling and server lifecycle; no external Go web framework |
 | **Next.js 16.4** | React App Router frontend and a same-origin proxy to the Go API |
 | **React** | Components, form state, asynchronous comparison state and interactive results |
@@ -52,7 +68,7 @@ Prices are deterministic for the same inputs. Refreshing within the cache window
 | **GitHub Actions** | Automatic Go checks, TypeScript checks and production frontend builds |
 | **VS Code** | Workspace, recommended extensions, run tasks and a Go debugging configuration |
 
-There is no database, login system, external geocoder or live provider integration in this version. Next.js forwards requests; the comparison business logic lives in Go.
+Observation storage uses optional local PostgreSQL. There is no account/login system, external geocoder or live ride-provider integration. Next.js forwards requests; comparison logic and observation validation/storage live in Go. This single-user prototype is intended for a trusted local machine; add authentication and access controls before exposing observation endpoints publicly.
 
 ## Architecture and request pipeline
 
@@ -295,7 +311,7 @@ bash scripts/check.sh
 
 This runs the local Python token-setup tests, Go tests with the race detector, `go vet`, frontend location/API unit tests, TypeScript checks and a production Next.js build. GitHub Actions runs the equivalent checks on pushes and pull requests. The Go workflow checks both the supported minimum version and the current development version.
 
-The 32 frontend tests cover synthetic geolocation and coordinate requests, runtime response validation (including malformed successful responses), category filtering, product identity, missing ETAs, range display, overlapping ranges, per-product expiry, independent endpoint capture/swapping, map bounds/precision/provenance, map-confirmation cancellation and routing/traffic contract validation (including contradictory coverage and ranges). Run them with `pnpm test` from `frontend/`. They do not read anyone's real location or display a real permission prompt.
+The 37 frontend tests cover synthetic geolocation and coordinate requests, runtime response validation (including malformed successful responses), category filtering, product identity, missing ETAs, range display, overlapping ranges, per-product expiry, independent endpoint capture/swapping, map bounds/precision/provenance, map-confirmation cancellation and routing/traffic contract validation (including contradictory coverage and ranges), exact-cent observation parsing, Singapore timestamps, immutable snapshot provenance, quality flags and malformed-save rejection. Run them with `pnpm test` from `frontend/`. They do not read anyone's real location or display a real permission prompt.
 
 TypeScript checking and a production build are static/build checks. Domain helpers and API boundaries have behavioral unit tests, but a repeatable full browser suite remains a future improvement. Category filtering, multiple products, partial ETA display and product expiry were also checked in the local browser, along with a 390-pixel iPhone layout with no horizontal overflow. The current screenshots show the interactive destination picker and a comparison using real OneMap route distance/time with simulated fares. The map dialog and journey summary are checked at a 390-pixel iPhone width without horizontal overflow.
 
@@ -314,7 +330,7 @@ Grab publishes a [Farefeed API](https://developer.grab.com/products/farefeed-api
 
 Permission to access the user's device location is different from permission to access data inside a ride-hailing app. The prototype now supports optional device location, while provider-app data access remains unresolved.
 
-**Use current location** invokes `navigator.geolocation.getCurrentPosition()` only after a click. The browser manages permission; an already-granted permission may not produce another prompt. The server cannot request device permission or read GPS directly. After permission succeeds, latitude, longitude and accuracy are sent in a POST body to this app's backend, which validates them and returns a `Current location` value. Raw coordinates stay in page/request memory and are not written to disk or sent to ride providers. When OneMap routing is enabled, comparing forwards both endpoint coordinates to OneMap for the route calculation. The comparison cache retains a hashed route fingerprint and a quote, without raw coordinates, in bounded process memory. Hashing is not a guarantee of anonymization. The UI preserves manual selection after errors and ignores canceled lookups.
+**Use current location** invokes `navigator.geolocation.getCurrentPosition()` only after a click. The browser manages permission; an already-granted permission may not produce another prompt. The server cannot request device permission or read GPS directly. After permission succeeds, latitude, longitude and accuracy are sent in a POST body to this app's backend, which validates them and returns a `Current location` value. Ordinary comparison coordinates stay out of the observation database and are not sent to ride providers. Explicitly capturing a trip in the logger stores its coordinates and features locally in PostgreSQL. The “Log a real fare” link carries a temporary trip draft in browser session storage until the dashboard opens; that draft is not a saved observation. When OneMap routing is enabled, comparing forwards both endpoint coordinates to OneMap for the route calculation. The comparison cache retains a hashed route fingerprint and a quote, without raw coordinates, in bounded process memory. Hashing is not a guarantee of anonymization. The UI preserves manual selection after errors and ignores canceled lookups.
 
 Browser geolocation requires a secure context: localhost works for development, while iPhone access over the plain-HTTP LAN URL does not support this feature. Use HTTPS for phone geolocation; manual sample-location selection continues to work over the LAN URL. No reverse geocoding is performed, so the selected point is labelled **Current location**, rather than a street address. See [MDN's Geolocation API documentation](https://developer.mozilla.org/en-US/docs/Web/API/Geolocation_API).
 
@@ -368,7 +384,7 @@ The original Next.js development watcher could not start its native macOS file-e
 
 ## Run locally
 
-Install **Go 1.22+**, **Node.js 20.9+** (a supported LTS version is recommended), and **pnpm 11.25.0**.
+Install **Go 1.25+**, **Node.js 20.9+** (a supported LTS version is recommended), and **pnpm 11.25.0**.
 
 ```sh
 git clone https://github.com/Raghaaavvv/farewise.git
@@ -405,6 +421,7 @@ This exposes the development frontend to the local network. The Go API can remai
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `FAREWISE_ADDR` | `127.0.0.1:8080` | Go API listening address |
+| `DATABASE_URL` | unset | Backend-only PostgreSQL connection string. `dev.sh` loads generated `backend/db.env`; unset disables the observation API without affecting comparison |
 | `API_BASE_URL` | `http://127.0.0.1:8080` | Next.js server-side API proxy target; set before startup |
 | `FAREWISE_ROUTING_PROVIDER` | `approximate` | `approximate` uses offline demo distance; `onemap` requests Singapore driving routes |
 | `ONEMAP_TOKEN` | unset | Backend-only OneMap access token, required in `onemap` mode |
@@ -469,7 +486,56 @@ An authenticated public sample was verified on **14 October 2026**: the Changi-t
 
 ### Future traffic sources
 
-Estimated expressway travel times and traffic incidents remain future additions; no fabricated incident delay is added now. [Traffic Images](https://data.gov.sg/datasets/d_6cdb6b405b25aaaacbaf7689bcc6fae0/view) remain unintegrated: camera images require additional processing to become congestion features. No forecasting model or training dataset has been built.
+Estimated expressway travel times and traffic incidents remain future additions; no fabricated incident delay is added now. [Traffic Images](https://data.gov.sg/datasets/d_6cdb6b405b25aaaacbaf7689bcc6fae0/view) remain unintegrated: camera images require additional processing to become congestion features. No forecasting model has been built. The observation dashboard can now collect a private calibration dataset; actual manual observations are required before claiming prediction accuracy.
+
+## Observation data and research workflow
+
+### Storage and timing
+
+Two tables separate captured context from manual labels:
+
+- `observation_sessions`: UUID, capture timestamp, request fingerprint and JSONB snapshot containing the resolved trip, route/traffic provenance, area labels, simulated reference quotes and feature/formula versions. Geometry is excluded. Snapshots are immutable.
+- `fare_observations`: UUID, session foreign key, provider, exact product, integer-cent fare, displayed-quote/paid-fare distinction, observation timestamp, reported weather/promotion, optionally known included fees, notes, revision and creation/update timestamps.
+
+A session can have several providers' observations, each with its own timestamp. “Capture fresh conditions” creates a new session even when the route is unchanged. Network retries reuse the pending request's UUID and fingerprint, so retrying a successful-but-lost response does not create a duplicate. Reusing an ID with different details returns 409. Corrections increment a revision and reject stale edits; they preserve session linkage and the original snapshot. Fare corrections do not retain a full change-history audit log yet.
+
+The server validates coordinates/route inputs, required fields, finite values, integer cents, supported categories, included fees and future dates. It stores timestamps in UTC and derives weekdays/time buckets in Singapore time. The dashboard always identifies its date/time input as SGT, regardless of the device's timezone. Weather and area types are manual labels; no weather or land-use feature retrieval has been implemented.
+
+`contextAligned` requires capture at most one minute after or five minutes before the fare observation. `trafficFreshAtQuote` separately checks the captured LTA observation/expiry against that fare time. Backdated entries remain saved, with mismatches flagged; current traffic is never presented as historical traffic. `trainingEligible` is only a coarse candidate flag for a displayed quote, time alignment and an actual OneMap road route. It does not guarantee accuracy, complete features or adequate dataset coverage. Paid fares remain separate, promotions may need filtering, and missing traffic stays explicit.
+
+### Dashboard, export and backups
+
+The dashboard shows collection counts, distinct coordinate/passenger/vehicle routes, provider/weekday/time coverage, provider/search filters and 20-row history pages. Coverage summaries describe the whole collection; the table and export use the selected filters. Corrections leave captured conditions fixed. Reusing a saved route requires capturing fresh conditions before a new fare.
+
+CSV export contains observation/session IDs for grouping, actual fare cents, quote/paid distinction, UTC/SGT times, endpoints, manual area/weather labels, road distance/duration, original baseline, traffic provenance/coverage/expiry, quality flags, feature versions and separately identified demo fare/scenario columns. Exports are limited to 10,000 matching entries per file. User-entered text that could become a spreadsheet formula is escaped. Demo prices remain reference/debug data, not a verified provider base fare or a surge label. No automatic multiplier is learned from two examples.
+
+Database credentials, backups and exports are ignored by Git. No real observation data is included in the public repo or project ZIP. Docker volumes survive ordinary container stops/recreation; **do not remove the data volume to reset the app**. Keep backups of your own collection:
+
+```bash
+bash scripts/backup-db.sh   # owner-only custom-format backup of the public schema
+bash scripts/db.sh status
+bash scripts/db.sh stop    # stops PostgreSQL while preserving the volume
+bash scripts/db.sh up      # starts it again
+bash scripts/db.sh shell   # opens psql inside the container
+```
+
+The backup helper creates a private file under ignored `backups/`. Restoring a backup should be an explicit separate operation; no automatic destructive restore/reset command is included. Changing the generated password after PostgreSQL initialisation does not automatically rotate the database role's password.
+
+### Implementation and verification
+
+`POST /api/observation-sessions` resolves the trip through the same routing/traffic pipeline used by comparison, captures simulated reference products and saves the server-generated snapshot. No feature values supplied by a browser are accepted as authoritative routing data. `POST /api/observations` saves only manually reported fare fields linked to a saved session. Read/edit/export operations use parameterised SQL, bounded context deadlines and a four-connection pool. Database errors are sanitised; application logs never include prices, coordinates, database URLs or credentials. JSON mutations validate content type and browser origin.
+
+Read the backend in order: `internal/observations/models.go` (contracts/validation/quality), `migrations/001_observations.sql` (schema), `postgres.go` (migration and repository), `internal/api/observations.go` (HTTP flow), `csv.go` (research export). The client lives in `src/lib/observations.ts`; `src/app/observations/page.tsx` renders the dashboard. PostgreSQL/Docker are required for persistence, while the comparison-only app continues to work with `DATABASE_URL` unset.
+
+Run database tests separately:
+
+```bash
+bash scripts/test-db.sh
+```
+
+These tests use unique temporary PostgreSQL schemas and remove only their own fixtures. They verify migrations, immutable snapshots, duplicate/replayed/concurrent saves, optimistic corrections, search parameterisation, statistics and reconnection persistence. Unit/HTTP tests cover validation, source provenance, timing, CSV escaping, content type/origin checks and credential-safe errors. CI has a real PostgreSQL service in addition to Go race/vet, frontend tests/type checks and production builds. Browser verification uses an isolated test schema and explicitly synthetic fares, leaving the real collection empty.
+
+Two weeks is an initial collection period, not a guarantee of sufficient training data. Collect matched products on repeated routes across time slots, weekdays/weekends and conditions. Keep related observations grouped by session when splitting data, evaluate on later days, and hold out routes before claiming generalisation to unseen trips. Start by analysing real fares and observed reference fares; a model should predict the actual quote instead of fitting an arbitrary multiplier to demo coefficients.
 
 ## API contract
 
@@ -479,6 +545,11 @@ Estimated expressway travel times and traffic incidents remain future additions;
 | GET | `/api/locations` | Sample locations, coordinates and `routingSource` for disclosure |
 | POST | `/api/locations/current` | Validated device location, source `device`, and `persisted: false` |
 | POST | `/api/locations/map` | Validated map coordinates, source `map`, ID `map-location`, and `persisted: false` |
+| GET | `/api/observations/status` | Local PostgreSQL configuration status |
+| POST / GET | `/api/observation-sessions` / `/api/observation-sessions/{id}` | Capture and read a server-generated trip snapshot |
+| POST / GET | `/api/observations` | Save manual fare fields or list filtered records and coverage |
+| PUT | `/api/observations/{id}` | Revision-checked fare correction without replacing its snapshot |
+| GET | `/api/observations/export` | Filtered CSV export with provenance and quality flags |
 | POST | `/api/compare` | Resolved trip, quotes, source notice and timestamps |
 
 Example comparison request:
@@ -515,6 +586,7 @@ backend/
   cmd/server/main.go          HTTP startup, configuration and shutdown
   internal/api/               Routes, JSON handling and handler tests
   internal/fare/              Models, adapters, service and domain tests
+  internal/observations/      Models, PostgreSQL repository, SQL migration, CSV and tests
   internal/routing/           OneMap geometry, LTA snapshot worker, traffic estimator and tests
   .env.example                Backend-only routing configuration template
 frontend/
@@ -552,6 +624,7 @@ Farewise.code-workspace      Portable VS Code workspace
 - [ ] Evaluate a calibrated algorithmic estimate provider, clearly separated from live quotes and demo prices.
 - [x] Bound provider concurrency and prove context cancellation with a real fake-server HTTP call.
 - [x] Add runtime API response validation and structured provider logs.
+- [x] Add Docker/PostgreSQL observation capture, manual fare logging, corrections, CSV and database CI tests.
 - [ ] Add full browser interaction tests.
 - [ ] Add deployment configuration, authentication where needed and operational monitoring.
 

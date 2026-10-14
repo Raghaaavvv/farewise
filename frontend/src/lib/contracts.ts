@@ -402,3 +402,5 @@ export function parseMapLocation(value: unknown): {
     return fail();
   return { location, source: "map", persisted: false };
 }
+
+export { timestamp as parseTimestamp };

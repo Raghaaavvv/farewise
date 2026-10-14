@@ -19,6 +19,8 @@ for tool in go node pnpm; do
     exit 1
   fi
 done
+export GOPATH="${GOPATH:-${TMPDIR:-/tmp}/farewise-go-work}"
+export GOMODCACHE="${GOMODCACHE:-${TMPDIR:-/tmp}/farewise-go-mod-cache}"
 export GOCACHE="${TMPDIR:-/tmp}/farewise-go-cache"
 export GOTOOLCHAIN=local
 export NEXT_TELEMETRY_DISABLED=1
