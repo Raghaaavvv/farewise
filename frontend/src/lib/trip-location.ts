@@ -1,15 +1,19 @@
+// Keep coordinates attached to their own endpoint when selecting or swapping locations.
 import type { DeviceCoordinates, Location, TripRequest } from "./api";
 
 export type Endpoint = "pickup" | "dropoff";
+
 export type DevicePosition = {
   location: Location;
   coordinates: DeviceCoordinates;
 };
 
+/** Identify endpoints whose coordinates come from the device or map rather than the catalog. */
 export function isCoordinateLocation(id: string): boolean {
   return id === "current-location" || id === "map-location";
 }
 
+/** Replace the destination and its coordinate snapshot together. */
 export function withMapLocation(
   trip: TripRequest,
   coordinates: DeviceCoordinates,
@@ -30,19 +34,22 @@ export function withDeviceLocation(
   endpoint: Endpoint,
   coordinates: DeviceCoordinates,
 ): TripRequest {
-  return endpoint === "pickup"
-    ? {
-        ...trip,
-        pickupId: "current-location",
-        pickupCoordinates: { ...coordinates },
-      }
-    : {
-        ...trip,
-        dropoffId: "current-location",
-        dropoffCoordinates: { ...coordinates },
-      };
+  if (endpoint === "pickup") {
+    return {
+      ...trip,
+      pickupId: "current-location",
+      pickupCoordinates: { ...coordinates },
+    };
+  }
+
+  return {
+    ...trip,
+    dropoffId: "current-location",
+    dropoffCoordinates: { ...coordinates },
+  };
 }
 
+/** Swap identifiers and coordinate snapshots together so each endpoint keeps the correct point. */
 export function swapTrip(trip: TripRequest): TripRequest {
   return {
     ...trip,
@@ -53,17 +60,22 @@ export function swapTrip(trip: TripRequest): TripRequest {
   };
 }
 
+/** Resolve both endpoint points before checking whether they represent the same location. */
 export function sameEndpoints(trip: TripRequest, catalog: Location[]): boolean {
   const pickup = isCoordinateLocation(trip.pickupId)
     ? trip.pickupCoordinates
-    : catalog.find((l) => l.id === trip.pickupId);
+    : catalog.find((location) => location.id === trip.pickupId);
+
   const dropoff = isCoordinateLocation(trip.dropoffId)
     ? trip.dropoffCoordinates
-    : catalog.find((l) => l.id === trip.dropoffId);
-  if (pickup && dropoff)
+    : catalog.find((location) => location.id === trip.dropoffId);
+
+  if (pickup && dropoff) {
     return (
       pickup.latitude === dropoff.latitude &&
       pickup.longitude === dropoff.longitude
     );
+  }
+
   return trip.pickupId === trip.dropoffId;
 }

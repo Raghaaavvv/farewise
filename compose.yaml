@@ -1,3 +1,4 @@
+# Local-only PostgreSQL service with a persistent observation volume.
 name: farewise
 services:
   db:
@@ -7,6 +8,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-farewise}
       POSTGRES_USER: ${POSTGRES_USER:-farewise}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run python3 scripts/setup-db.py first}
+    # Bind to loopback so the database is not exposed on the local network.
     ports:
       - "127.0.0.1:${FAREWISE_DB_PORT:-55432}:5432"
     volumes:

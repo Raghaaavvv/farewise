@@ -1,6 +1,9 @@
+// Present distance and driving-time provenance for a live comparison or a saved snapshot.
 import type { Route } from "@/lib/api";
+
 import { Icon } from "./icon";
 
+/** Render route metrics while distinguishing current traffic from historical captured conditions. */
 export function RoutePreview({
   route,
   loading,
@@ -13,10 +16,29 @@ export function RoutePreview({
   historical?: boolean;
 }) {
   const traffic = route?.traffic;
+
   const trafficExpired =
     !historical &&
     !!traffic?.expiresAt &&
     Date.parse(traffic.expiresAt) <= Date.now();
+
+  // Resolve the label explicitly so the current, expired and historical cases are easy to review.
+  let drivingTimeLabel: string;
+
+  if (route?.trafficAware) {
+    if (historical) {
+      drivingTimeLabel = "Captured traffic estimate";
+    } else if (trafficExpired) {
+      drivingTimeLabel = "Previous traffic estimate";
+    } else {
+      drivingTimeLabel = "Traffic-adjusted estimate";
+    }
+  } else if (historical) {
+    drivingTimeLabel = "Captured baseline time";
+  } else {
+    drivingTimeLabel = "Baseline driving time";
+  }
+
   return (
     <div
       className="route-preview route-summary"
@@ -48,17 +70,7 @@ export function RoutePreview({
                   ? "—"
                   : `${Math.ceil(route.durationSeconds / 60)} min`}
               </strong>
-              <span>
-                {route.trafficAware
-                  ? historical
-                    ? "Captured traffic estimate"
-                    : trafficExpired
-                      ? "Previous traffic estimate"
-                      : "Traffic-adjusted estimate"
-                  : historical
-                    ? "Captured baseline time"
-                    : "Baseline driving time"}
-              </span>
+              <span>{drivingTimeLabel}</span>
             </div>
           </div>
           {dirty && (

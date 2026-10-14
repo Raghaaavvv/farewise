@@ -1,3 +1,4 @@
+// API boundary: forward cancellation, validate response JSON and format integer-cent fares.
 import {
   isRecord,
   parseComparison,
@@ -5,7 +6,9 @@ import {
   parseLocations,
   parseMapLocation,
 } from "./contracts";
+
 import type { FareRange } from "./contracts";
+
 export type {
   Location,
   ProductType,
@@ -40,13 +43,16 @@ export const initialTrip: TripRequest = {
   scenario: "normal",
 };
 
+/** Fetch a response without caching, preserve cancellation and validate the JSON before returning it. */
 export async function request<T>(
   path: string,
   parse: (value: unknown) => T,
   init: RequestInit = {},
 ): Promise<T> {
   const response = await fetch(path, { ...init, cache: "no-store" });
+
   let body: unknown;
+
   try {
     body = await response.json();
   } catch {
@@ -54,19 +60,24 @@ export async function request<T>(
       "The comparison service is unavailable. Check that the Go backend is running, then try again.",
     );
   }
-  if (!response.ok)
+
+  if (!response.ok) {
     throw new Error(
       isRecord(body) && typeof body.error === "string"
         ? body.error
         : "The comparison service is unavailable. Please try again.",
     );
+  }
+
   return parse(body);
 }
 
+/** Load the preset locations and the configured routing source. */
 export function fetchLocations(signal?: AbortSignal) {
   return request("/api/locations", parseLocations, { signal });
 }
 
+/** Send device coordinates to Go for validation without saving an observation. */
 export function resolveCurrentLocation(
   coordinates: DeviceCoordinates,
   signal?: AbortSignal,
@@ -79,6 +90,7 @@ export function resolveCurrentLocation(
   });
 }
 
+/** Submit the selected trip and validate the returned comparison. */
 export function compareTrip(trip: TripRequest, signal?: AbortSignal) {
   return request("/api/compare", parseComparison, {
     method: "POST",
@@ -88,6 +100,7 @@ export function compareTrip(trip: TripRequest, signal?: AbortSignal) {
   });
 }
 
+/** Send the selected map point to Go for validation before using it as a destination. */
 export function resolveMapLocation(
   coordinates: DeviceCoordinates,
   signal?: AbortSignal,
@@ -100,6 +113,7 @@ export function resolveMapLocation(
   });
 }
 
+/** Convert integer cents into the SGD label shown to the user. */
 export function money(cents: number) {
   return new Intl.NumberFormat("en-SG", {
     style: "currency",
@@ -108,9 +122,15 @@ export function money(cents: number) {
   }).format(cents / 100);
 }
 
+/** Show both range bounds when supplied, or the single amount for a point fare. */
 export function fareLabel(fare: FareRange | null): string {
-  if (!fare) return "—";
-  return fare.isEstimateRange
-    ? `${money(fare.minFare)} – ${money(fare.maxFare)}`
-    : money(fare.minFare);
+  if (!fare) {
+    return "—";
+  }
+
+  if (fare.isEstimateRange) {
+    return `${money(fare.minFare)} – ${money(fare.maxFare)}`;
+  }
+
+  return money(fare.minFare);
 }

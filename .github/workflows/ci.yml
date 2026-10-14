@@ -1,3 +1,4 @@
+# Verify backend behavior, frontend contracts and real PostgreSQL persistence.
 name: CI
 
 on:
@@ -70,6 +71,7 @@ jobs:
       - name: Production build
         run: pnpm build
 
+  # Integration tests create and clean up their own isolated database schemas.
   database:
     name: PostgreSQL persistence tests
     runs-on: ubuntu-latest

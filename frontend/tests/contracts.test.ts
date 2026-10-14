@@ -1,11 +1,15 @@
+// Check the runtime comparison contract against valid and malformed provider data.
 import assert from "node:assert/strict";
+
 import test from "node:test";
+
 import {
   compareTrip,
   fetchLocations,
   initialTrip,
   resolveCurrentLocation,
 } from "../src/lib/api";
+
 import {
   parseComparison,
   parseQuote,
@@ -21,6 +25,7 @@ const location = {
   latitude: 1.304,
   longitude: 103.832,
 };
+
 function quote(overrides: Record<string, unknown> = {}) {
   return {
     providerId: "demo",
@@ -42,6 +47,7 @@ function quote(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
 function comparison(quotes: unknown[] = [quote()]) {
   return {
     mode: "demo",
@@ -95,8 +101,11 @@ test("contract accepts multiple products, ranges, partial fields and unavailable
       }),
     ]),
   );
+
   assert.equal(result.quotes.length, 5);
+
   assert.equal(result.quotes[1].fare?.maxFare, 2600);
+
   assert.equal(result.quotes[2].etaMinutes, null);
 });
 
@@ -107,7 +116,9 @@ test("contract accepts an explicit zero fare and ignores additive fields", () =>
       futureField: "extra",
     }),
   );
+
   assert.equal(result.fare?.minFare, 0);
+
   assert.equal("futureField" in result, false);
 });
 
@@ -146,8 +157,9 @@ test("contract rejects contradictory statuses, identifiers, types and timestamps
     { fetchedAt: "2026-02-30T10:00:00Z" },
     { expiresAt: "2026-10-14T10:00:00Z" },
     { expiresAt: "2026-10-14T09:59:00Z" },
-  ])
+  ]) {
     assert.throws(() => parseQuote(quote(overrides)), ResponseValidationError);
+  }
 });
 
 test("contract rejects duplicate provider-product keys but allows different products", () => {
@@ -155,6 +167,7 @@ test("contract rejects duplicate provider-product keys but allows different prod
     () => parseComparison(comparison([quote(), quote()])),
     ResponseValidationError,
   );
+
   assert.equal(
     parseComparison(
       comparison([
@@ -168,15 +181,20 @@ test("contract rejects duplicate provider-product keys but allows different prod
 
 test("API boundary rejects invalid 200 responses before UI state receives them", async () => {
   const original = globalThis.fetch;
+
   try {
     globalThis.fetch = async () =>
       new Response(JSON.stringify(comparison([quote({ fare: "1800" })])));
+
     await assert.rejects(compareTrip(initialTrip), ResponseValidationError);
+
     globalThis.fetch = async () =>
       new Response(
         JSON.stringify({ locations: [{ ...location, latitude: 91 }] }),
       );
+
     await assert.rejects(fetchLocations(), ResponseValidationError);
+
     globalThis.fetch = async () =>
       new Response(
         JSON.stringify({
@@ -185,6 +203,7 @@ test("API boundary rejects invalid 200 responses before UI state receives them",
           persisted: true,
         }),
       );
+
     await assert.rejects(
       resolveCurrentLocation({ latitude: 1.3, longitude: 103.8 }),
       ResponseValidationError,
@@ -196,14 +215,18 @@ test("API boundary rejects invalid 200 responses before UI state receives them",
 
 test("API boundary handles malformed error JSON and non-JSON responses safely", async () => {
   const original = globalThis.fetch;
+
   try {
     globalThis.fetch = async () =>
       new Response(JSON.stringify({ error: { message: "bad" } }), {
         status: 502,
       });
+
     await assert.rejects(compareTrip(initialTrip), /service is unavailable/);
+
     globalThis.fetch = async () =>
       new Response("<html>Bad gateway</html>", { status: 502 });
+
     await assert.rejects(compareTrip(initialTrip), /service is unavailable/);
   } finally {
     globalThis.fetch = original;
@@ -212,6 +235,7 @@ test("API boundary handles malformed error JSON and non-JSON responses safely", 
 
 test("comparison validates finite coordinates, passengers and collection expiry", () => {
   const valid = comparison();
+
   for (const value of [
     null,
     [],
@@ -242,7 +266,9 @@ test("route contract distinguishes real driving distance from approximation", ()
       trafficAware: false,
     },
   );
+
   const route = comparison().trip.route;
+
   for (const value of [
     null,
     { ...route, source: "unknown" },
@@ -251,19 +277,24 @@ test("route contract distinguishes real driving distance from approximation", ()
     { ...route, source: "onemap" },
     { ...route, durationSeconds: 100 },
     { ...route, trafficAware: true },
-  ])
+  ]) {
     assert.throws(() => parseRoute(value), ResponseValidationError);
+  }
+
   const valid = comparison();
+
   assert.throws(
     () =>
       parseComparison({ ...valid, trip: { ...valid.trip, distanceKm: 20 } }),
     ResponseValidationError,
   );
+
   assert.equal(
     parseLocations({ locations: [location], routingSource: "onemap" })
       .routingSource,
     "onemap",
   );
+
   assert.throws(
     () => parseLocations({ locations: [location], routingSource: "unknown" }),
     ResponseValidationError,

@@ -1,3 +1,4 @@
+// Use fake LTA HTTP responses to check paging, freshness, pacing, retries and cancellation.
 package routing
 
 import (
@@ -18,160 +19,272 @@ import (
 
 func testLTA(t *testing.T, handler http.HandlerFunc) *LTA {
 	t.Helper()
+
 	server := httptest.NewServer(handler)
+
 	t.Cleanup(server.Close)
+
 	client, err := NewLTA("test-only-account-key")
+
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	client.client = server.Client()
+
 	client.endpoint = server.URL
+
 	client.pageInterval = 0
+
 	client.pageWorkers = 1
+
 	return client
 }
+
 func testRow(id string) map[string]any {
-	return map[string]any{"LinkID": id, "SpeedBand": 4, "MinimumSpeed": "30", "MaximumSpeed": "39", "StartLat": "1.3", "StartLon": "103.8", "EndLat": "1.3", "EndLon": "103.81"}
+	return map[string]any{
+		"LinkID":       id,
+		"SpeedBand":    4,
+		"MinimumSpeed": "30",
+		"MaximumSpeed": "39",
+		"StartLat":     "1.3",
+		"StartLon":     "103.8",
+		"EndLat":       "1.3",
+		"EndLon":       "103.81",
+	}
 }
-func writePage(w http.ResponseWriter, revision string, rows []map[string]any) {
-	json.NewEncoder(w).Encode(map[string]any{"lastUpdatedTime": revision, "value": rows})
+
+func writePage(writer http.ResponseWriter, revision string, rows []map[string]any) {
+	json.NewEncoder(writer).Encode(map[string]any{
+		"lastUpdatedTime": revision,
+		"value":           rows,
+	})
 }
-func revisionNow() string { return time.Now().In(singapore).Format("2006-01-02 15:04:05") }
+
+func revisionNow() string {
+	return time.Now().In(singapore).Format("2006-01-02 15:04:05")
+}
 
 func TestLTAPaginationCacheAndCoalescing(t *testing.T) {
 	var calls atomic.Int32
+
 	revision := revisionNow()
-	client := testLTA(t, func(w http.ResponseWriter, r *http.Request) {
+
+	client := testLTA(t, func(writer http.ResponseWriter, httpRequest *http.Request) {
 		calls.Add(1)
-		if r.Header.Get("AccountKey") != "test-only-account-key" || r.Header.Get("Accept") != "application/json" {
+
+		if httpRequest.Header.Get("AccountKey") != "test-only-account-key" || httpRequest.Header.Get("Accept") != "application/json" {
 			t.Error("wrong authentication")
 		}
-		switch r.URL.Query().Get("$skip") {
+
+		switch httpRequest.URL.Query().Get("$skip") {
 		case "0":
 			rows := make([]map[string]any, 500)
 			for i := range rows {
 				rows[i] = testRow(fmt.Sprint(i))
 			}
-			writePage(w, revision, rows)
+			writePage(writer, revision, rows)
+
 		case "500":
-			writePage(w, revision, []map[string]any{testRow("last")})
+			writePage(writer, revision, []map[string]any{testRow("last")})
+
 		default:
 			t.Error("incorrect pagination")
 		}
 	})
+
 	var wait sync.WaitGroup
+
 	for i := 0; i < 12; i++ {
 		wait.Add(1)
+
 		go func() {
 			defer wait.Done()
+
 			s, _, err := client.load(context.Background())
+
 			if err != nil || len(s.links) != 501 {
 				t.Errorf("incomplete snapshot: %v", err)
 			}
 		}()
 	}
+
 	wait.Wait()
+
 	if calls.Load() != 2 {
 		t.Fatalf("refetched shared snapshot %d times", calls.Load())
 	}
+
 	s, cached, err := client.load(context.Background())
+
 	if err != nil || !cached || len(s.links) != 501 {
 		t.Fatal("cache miss")
 	}
 	// Expiring a snapshot triggers another complete collection, not page accumulation.
 	client.mu.Lock()
+
 	client.snapshot.expiresAt = time.Now().Add(-time.Second)
+
 	client.mu.Unlock()
+
 	_, _, err = client.load(context.Background())
+
 	if err != nil || calls.Load() != 4 {
 		t.Fatal("expired snapshot was reused")
 	}
 }
+
 func TestLTARejectsIncompleteStaleAndMalformedSnapshots(t *testing.T) {
-	for _, kind := range []string{"stale", "missing value", "bad numbers", "empty"} {
+	for _, kind := range []string{
+		"stale",
+		"missing value",
+		"bad numbers",
+		"empty",
+	} {
 		t.Run(kind, func(t *testing.T) {
 			revision := revisionNow()
-			client := testLTA(t, func(w http.ResponseWriter, r *http.Request) {
+
+			client := testLTA(t, func(writer http.ResponseWriter, httpRequest *http.Request) {
 				switch kind {
 				case "stale":
-					writePage(w, time.Now().Add(-11*time.Minute).In(singapore).Format("2006-01-02 15:04:05"), []map[string]any{testRow("old")})
+					writePage(
+						writer,
+						time.Now().Add(-11*time.Minute).In(singapore).Format("2006-01-02 15:04:05"),
+						[]map[string]any{testRow("old")},
+					)
+
 				case "missing value":
-					fmt.Fprint(w, `{"lastUpdatedTime":"invalid"}`)
+					fmt.Fprint(writer, `{"lastUpdatedTime":"invalid"}`)
+
 				case "bad numbers":
 					row := testRow("bad")
 					row["MinimumSpeed"] = "NaN"
-					writePage(w, revision, []map[string]any{row})
+					writePage(writer, revision, []map[string]any{row})
+
 				case "empty":
-					writePage(w, revision, []map[string]any{})
+					writePage(writer, revision, []map[string]any{})
 				}
 			})
+
 			s, _, err := client.load(context.Background())
+
 			if err == nil || s != nil || client.snapshot != nil {
 				t.Fatal("accepted incomplete/invalid snapshot")
 			}
 		})
 	}
 }
+
 func TestLTARetryAfterAndErrorsAreSanitized(t *testing.T) {
-	for _, status := range []int{401, 403, 429, 500} {
+	for _, status := range []int{
+		401,
+		403,
+		429,
+		500,
+	} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			var calls atomic.Int32
-			client := testLTA(t, func(w http.ResponseWriter, r *http.Request) {
+
+			client := testLTA(t, func(writer http.ResponseWriter, httpRequest *http.Request) {
 				calls.Add(1)
-				w.Header().Set("Retry-After", "120")
-				w.WriteHeader(status)
-				fmt.Fprint(w, "secret account key request URL")
+
+				writer.Header().Set("Retry-After", "120")
+
+				writer.WriteHeader(status)
+
+				fmt.Fprint(writer, "secret account key request URL")
 			})
+
 			_, _, err := client.load(context.Background())
+
 			if err == nil || strings.Contains(err.Error(), "secret") {
 				t.Fatal("unsafe upstream error")
 			}
+
 			_, _, err = client.load(context.Background())
+
 			if err == nil || calls.Load() != 1 {
 				t.Fatal("failure cooldown did not protect upstream")
 			}
+
 			if status == 429 && time.Until(client.nextAttempt) < 119*time.Second {
 				t.Fatal("Retry-After ignored")
 			}
 		})
 	}
 }
+
 func TestLTACancellationReachesHTTPServer(t *testing.T) {
 	started, canceled := make(chan struct{}), make(chan struct{})
-	client := testLTA(t, func(w http.ResponseWriter, r *http.Request) { close(started); <-r.Context().Done(); close(canceled) })
+
+	client := testLTA(t, func(writer http.ResponseWriter, httpRequest *http.Request) {
+		close(started)
+
+		<-httpRequest.Context().Done()
+
+		close(canceled)
+	})
+
 	ctx, cancel := context.WithCancel(context.Background())
+
 	defer cancel()
+
 	result := make(chan error, 1)
-	go func() { _, _, err := client.load(ctx); result <- err }()
+
+	go func() {
+		_, _, err := client.load(ctx)
+
+		result <- err
+	}()
+
 	select {
 	case <-started:
+
 	case <-time.After(time.Second):
 		t.Fatal("request did not start")
 	}
+
 	cancel()
+
 	select {
 	case err := <-result:
 		if !errors.Is(err, context.Canceled) {
 			t.Fatal("lost cancellation")
 		}
+
 	case <-time.After(time.Second):
 		t.Fatal("request did not cancel")
 	}
+
 	select {
 	case <-canceled:
+
 	case <-time.After(time.Second):
 		t.Fatal("HTTP server did not observe cancellation")
 	}
 }
+
 func TestLTARejectsRedirectWithoutForwardingKey(t *testing.T) {
 	var leaked atomic.Bool
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { leaked.Store(true) }))
+
+	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, httpRequest *http.Request) {
+		leaked.Store(true)
+	}))
+
 	defer target.Close()
-	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, target.URL, 302) }))
+
+	source := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, httpRequest *http.Request) {
+		http.Redirect(writer, httpRequest, target.URL, 302)
+	}))
+
 	defer source.Close()
+
 	client, _ := NewLTA("test-only-account-key")
+
 	client.endpoint = source.URL
+
 	_, _, err := client.load(context.Background())
+
 	if err == nil || leaked.Load() {
 		t.Fatal("followed credential redirect")
 	}
@@ -179,74 +292,117 @@ func TestLTARejectsRedirectWithoutForwardingKey(t *testing.T) {
 
 func TestLTAPageTimestampsAndStaleRows(t *testing.T) {
 	fresh := revisionNow()
+
 	older := time.Now().Add(-time.Minute).In(singapore).Format("2006-01-02 15:04:05")
+
 	stale := time.Now().Add(-11 * time.Minute).In(singapore).Format("2006-01-02 15:04:05")
-	client := testLTA(t, func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Query().Get("$skip") {
+
+	client := testLTA(t, func(writer http.ResponseWriter, httpRequest *http.Request) {
+		switch httpRequest.URL.Query().Get("$skip") {
 		case "0":
 			rows := make([]map[string]any, 500)
 			for i := range rows {
 				rows[i] = testRow(fmt.Sprint(i))
 			}
-			writePage(w, fresh, rows)
+			writePage(writer, fresh, rows)
+
 		case "500":
 			rows := make([]map[string]any, 500)
 			for i := range rows {
 				rows[i] = testRow("stale" + fmt.Sprint(i))
 			}
-			writePage(w, stale, rows)
+			writePage(writer, stale, rows)
+
 		case "1000":
-			writePage(w, older, []map[string]any{testRow("older-fresh")})
+			writePage(writer, older, []map[string]any{testRow("older-fresh")})
 		}
 	})
+
 	result, _, err := client.load(context.Background())
+
 	if err != nil || len(result.links) != 501 || result.observedAt.In(singapore).Format("2006-01-02 15:04:05") != older {
 		t.Fatal("failed to normalize page freshness", err)
 	}
 }
+
 func TestLTABaselineWhileWorkerRefreshesAndShutdownCancels(t *testing.T) {
 	started, canceled := make(chan struct{}), make(chan struct{})
-	client := testLTA(t, func(w http.ResponseWriter, r *http.Request) { close(started); <-r.Context().Done(); close(canceled) })
+
+	client := testLTA(t, func(writer http.ResponseWriter, httpRequest *http.Request) {
+		close(started)
+
+		<-httpRequest.Context().Done()
+
+		close(canceled)
+	})
+
 	ctx, cancel := context.WithCancel(context.Background())
+
 	defer cancel()
+
 	done := make(chan struct{})
-	go func() { client.Run(ctx); close(done) }()
+
+	go func() {
+		client.Run(ctx)
+
+		close(done)
+	}()
+
 	select {
 	case <-started:
+
 	case <-time.After(time.Second):
 		t.Fatal("worker did not start")
 	}
+
 	startedAt := time.Now()
+
 	route := client.Enrich(context.Background(), eastRoute())
+
 	if time.Since(startedAt) > 100*time.Millisecond || route.TrafficAware || route.Traffic.Status != "unavailable" || *route.DurationSeconds != 120 {
 		t.Fatal("comparison blocked on cold collection")
 	}
+
 	cancel()
+
 	select {
 	case <-done:
+
 	case <-time.After(time.Second):
 		t.Fatal("worker did not stop")
 	}
+
 	select {
 	case <-canceled:
+
 	case <-time.After(time.Second):
 		t.Fatal("worker HTTP was not canceled")
 	}
 }
+
 func TestLTAPublishesAdjustedDurationAndRetainsBaselineOnFailure(t *testing.T) {
-	client := testLTA(t, func(w http.ResponseWriter, r *http.Request) {
-		writePage(w, revisionNow(), []map[string]any{testRow("east")})
+	client := testLTA(t, func(writer http.ResponseWriter, httpRequest *http.Request) {
+		writePage(writer, revisionNow(), []map[string]any{testRow("east")})
 	})
-	if _, _, err := client.load(context.Background()); err != nil {
-		t.Fatal(err)
+
+	_, _, loadError := client.load(context.Background())
+
+	if loadError != nil {
+		t.Fatal(loadError)
 	}
+
 	route := client.Enrich(context.Background(), eastRoute())
+
 	if !route.TrafficAware || route.Traffic.Status != "applied" || route.Traffic.BaselineSeconds != 120 || *route.DurationSeconds == 120 {
 		t.Fatal("did not apply traffic result")
 	}
+
 	original := eastRoute()
+
 	original.Geometry = nil
+
 	route = client.Enrich(context.Background(), original)
+
 	if route.TrafficAware || *route.DurationSeconds != 120 || route.Traffic.Status != "no_geometry" {
 		t.Fatal("lost honest baseline fallback")
 	}
@@ -254,37 +410,61 @@ func TestLTAPublishesAdjustedDurationAndRetainsBaselineOnFailure(t *testing.T) {
 
 func TestLTARefreshKeepsPreviousFreshSnapshotUsable(t *testing.T) {
 	started := make(chan struct{})
+
 	var calls atomic.Int32
-	client := testLTA(t, func(w http.ResponseWriter, r *http.Request) {
+
+	client := testLTA(t, func(writer http.ResponseWriter, httpRequest *http.Request) {
 		if calls.Add(1) == 1 {
-			writePage(w, revisionNow(), []map[string]any{testRow("east")})
+			writePage(writer, revisionNow(), []map[string]any{testRow("east")})
+
 			return
 		}
+
 		close(started)
-		<-r.Context().Done()
+
+		<-httpRequest.Context().Done()
 	})
-	if _, _, err := client.load(context.Background()); err != nil {
-		t.Fatal(err)
+
+	_, _, loadError := client.load(context.Background())
+
+	if loadError != nil {
+		t.Fatal(loadError)
 	}
+
 	ctx, cancel := context.WithCancel(context.Background())
+
 	defer cancel()
+
 	done := make(chan error, 1)
-	go func() { _, _, err := client.loadSnapshot(ctx, true); done <- err }()
+
+	go func() {
+		_, _, err := client.loadSnapshot(ctx, true)
+
+		done <- err
+	}()
+
 	select {
 	case <-started:
+
 	case <-time.After(time.Second):
 		t.Fatal("forced refresh reused cache")
 	}
+
 	route := client.Enrich(context.Background(), eastRoute())
+
 	if !route.TrafficAware {
 		t.Fatal("refresh discarded previous valid snapshot")
 	}
+
 	cancel()
+
 	select {
 	case <-done:
+
 	case <-time.After(time.Second):
 		t.Fatal("refresh did not cancel")
 	}
+
 	if !client.Enrich(context.Background(), eastRoute()).TrafficAware {
 		t.Fatal("failed refresh discarded valid snapshot")
 	}
@@ -292,55 +472,83 @@ func TestLTARefreshKeepsPreviousFreshSnapshotUsable(t *testing.T) {
 
 func TestLTAConcurrentPagesStayBoundedAndFinishInOrder(t *testing.T) {
 	var active, peak atomic.Int32
+
 	var earlyTerminal atomic.Bool
+
 	earlierStarted, laterReady := make(chan struct{}), make(chan struct{})
-	client := testLTA(t, func(w http.ResponseWriter, r *http.Request) {
+
+	client := testLTA(t, func(writer http.ResponseWriter, httpRequest *http.Request) {
 		n := active.Add(1)
+
 		defer active.Add(-1)
+
 		for {
 			previous := peak.Load()
+
 			if n <= previous || peak.CompareAndSwap(previous, n) {
 				break
 			}
 		}
-		offset, _ := strconv.Atoi(r.URL.Query().Get("$skip"))
+
+		offset, _ := strconv.Atoi(httpRequest.URL.Query().Get("$skip"))
+
 		if offset == 500 {
 			close(earlierStarted)
+
 			select {
 			case <-laterReady:
-			case <-r.Context().Done():
+
+			case <-httpRequest.Context().Done():
 				return
 			}
+
 			time.Sleep(30 * time.Millisecond)
 		}
+
 		if offset == 1000 {
 			select {
 			case <-earlierStarted:
-			case <-r.Context().Done():
+
+			case <-httpRequest.Context().Done():
 				return
 			}
+
 			close(laterReady)
+
 			earlyTerminal.Store(true)
-			writePage(w, revisionNow(), []map[string]any{testRow("last")})
+
+			writePage(writer, revisionNow(), []map[string]any{testRow("last")})
+
 			return
 		}
+
 		if offset > 1000 {
-			writePage(w, revisionNow(), []map[string]any{})
+			writePage(writer, revisionNow(), []map[string]any{})
+
 			return
 		}
+
 		rows := make([]map[string]any, 500)
+
 		for i := range rows {
 			rows[i] = testRow(fmt.Sprint(offset + i))
 		}
-		writePage(w, revisionNow(), rows)
+
+		writePage(writer, revisionNow(), rows)
 	})
+
 	client.pageWorkers = 4
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+
 	defer cancel()
+
 	snapshot, _, err := client.load(ctx)
+
 	if err != nil || len(snapshot.links) != 1001 {
 		t.Fatal("published an incomplete or out-of-order snapshot", err)
 	}
+
 	if !earlyTerminal.Load() || peak.Load() < 2 || peak.Load() > 4 {
 		t.Fatal("requests did not overlap within bounded concurrency", peak.Load())
 	}
@@ -348,30 +556,49 @@ func TestLTAConcurrentPagesStayBoundedAndFinishInOrder(t *testing.T) {
 
 func TestLTAPagePacerIsSharedAcrossWorkers(t *testing.T) {
 	pacer := &pagePacer{interval: 15 * time.Millisecond}
+
 	var lock sync.Mutex
+
 	var starts []time.Time
+
 	var wait sync.WaitGroup
+
 	for i := 0; i < 8; i++ {
 		wait.Add(1)
+
 		go func() {
 			defer wait.Done()
-			if err := pacer.wait(context.Background()); err != nil {
-				t.Error(err)
+
+			waitError := pacer.wait(context.Background())
+
+			if waitError != nil {
+				t.Error(waitError)
 			}
+
 			lock.Lock()
+
 			starts = append(starts, time.Now())
+
 			lock.Unlock()
 		}()
 	}
+
 	wait.Wait()
-	sort.Slice(starts, func(i, j int) bool { return starts[i].Before(starts[j]) })
+
+	sort.Slice(starts, func(i, j int) bool {
+		return starts[i].Before(starts[j])
+	})
+
 	for i := 1; i < len(starts); i++ {
 		if starts[i].Sub(starts[i-1]) < 10*time.Millisecond {
 			t.Fatal("worker pacing multiplied the global request rate")
 		}
 	}
+
 	ctx, cancel := context.WithCancel(context.Background())
+
 	cancel()
+
 	if !errors.Is(pacer.wait(ctx), context.Canceled) {
 		t.Fatal("pacing ignored cancellation")
 	}
@@ -379,36 +606,48 @@ func TestLTAPagePacerIsSharedAcrossWorkers(t *testing.T) {
 
 func TestLTAConcurrent429CancelsEarlierHTTPAndKeepsCooldown(t *testing.T) {
 	earlierStarted, earlierCanceled := make(chan struct{}), make(chan struct{})
-	client := testLTA(t, func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Query().Get("$skip") {
+
+	client := testLTA(t, func(writer http.ResponseWriter, httpRequest *http.Request) {
+		switch httpRequest.URL.Query().Get("$skip") {
 		case "0":
 			rows := make([]map[string]any, 500)
 			for i := range rows {
 				rows[i] = testRow(fmt.Sprint(i))
 			}
-			writePage(w, revisionNow(), rows)
+			writePage(writer, revisionNow(), rows)
+
 		case "500":
 			close(earlierStarted)
-			<-r.Context().Done()
+			<-httpRequest.Context().Done()
 			close(earlierCanceled)
+
 		case "1000":
 			<-earlierStarted
-			w.Header().Set("Retry-After", "120")
-			w.WriteHeader(429)
+			writer.Header().Set("Retry-After", "120")
+			writer.WriteHeader(429)
+
 		default:
-			writePage(w, revisionNow(), []map[string]any{})
+			writePage(writer, revisionNow(), []map[string]any{})
 		}
 	})
+
 	client.pageWorkers = 2
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+
 	defer cancel()
+
 	snapshot, _, err := client.load(ctx)
+
 	var failure *Error
+
 	if snapshot != nil || !errors.As(err, &failure) || failure.RetryAfter != 120*time.Second || time.Until(client.nextAttempt) < 119*time.Second {
 		t.Fatal("lost rate limit or published partial data", err)
 	}
+
 	select {
 	case <-earlierCanceled:
+
 	case <-time.After(time.Second):
 		t.Fatal("429 did not cancel outstanding HTTP")
 	}
@@ -416,38 +655,59 @@ func TestLTAConcurrent429CancelsEarlierHTTPAndKeepsCooldown(t *testing.T) {
 
 func TestLTAConcurrentPageRetryDoesNotRestartSnapshot(t *testing.T) {
 	var lock sync.Mutex
+
 	calls := map[string]int{}
-	client := testLTA(t, func(w http.ResponseWriter, r *http.Request) {
-		offset := r.URL.Query().Get("$skip")
+
+	client := testLTA(t, func(writer http.ResponseWriter, httpRequest *http.Request) {
+		offset := httpRequest.URL.Query().Get("$skip")
+
 		lock.Lock()
+
 		calls[offset]++
+
 		attempt := calls[offset]
+
 		lock.Unlock()
+
 		if offset == "500" && attempt == 1 {
-			w.WriteHeader(503)
+			writer.WriteHeader(503)
+
 			return
 		}
+
 		if offset == "0" || offset == "500" {
 			rows := make([]map[string]any, 500)
+
 			for i := range rows {
 				rows[i] = testRow(offset + "-" + fmt.Sprint(i))
 			}
-			writePage(w, revisionNow(), rows)
+
+			writePage(writer, revisionNow(), rows)
+
 			return
 		}
+
 		if offset == "1000" {
-			writePage(w, revisionNow(), []map[string]any{testRow("last")})
+			writePage(writer, revisionNow(), []map[string]any{testRow("last")})
+
 			return
 		}
-		writePage(w, revisionNow(), []map[string]any{})
+
+		writePage(writer, revisionNow(), []map[string]any{})
 	})
+
 	client.pageWorkers = 4
+
 	result, _, err := client.load(context.Background())
+
 	if err != nil || len(result.links) != 1001 {
 		t.Fatal("failed to recover page without discarding collection", err)
 	}
+
 	lock.Lock()
+
 	defer lock.Unlock()
+
 	if calls["0"] != 1 || calls["500"] != 2 || calls["1000"] != 1 {
 		t.Fatal("retried complete snapshot instead of failed page", calls)
 	}

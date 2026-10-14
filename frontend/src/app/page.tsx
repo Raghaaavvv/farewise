@@ -1,9 +1,15 @@
 "use client";
 
+// Comparison screen: manage the selected trip, request quotes and render their current status.
+
 import { useEffect, useMemo, useRef, useState } from "react";
+
 import type { FormEvent } from "react";
+
 import dynamic from "next/dynamic";
+
 import Link from "next/link";
+
 import {
   compareTrip,
   fetchLocations,
@@ -12,6 +18,7 @@ import {
   money,
   resolveCurrentLocation,
 } from "@/lib/api";
+
 import type {
   Comparison,
   Location,
@@ -19,7 +26,9 @@ import type {
   RoutingSource,
   TripRequest,
 } from "@/lib/api";
+
 import { getDeviceCoordinates } from "@/lib/geolocation";
+
 import {
   isCoordinateLocation,
   withMapLocation,
@@ -27,7 +36,9 @@ import {
   swapTrip,
   withDeviceLocation,
 } from "@/lib/trip-location";
+
 import type { DevicePosition, Endpoint } from "@/lib/trip-location";
+
 import {
   lowestQuote,
   priced,
@@ -35,9 +46,13 @@ import {
   quoteKey,
   sortedQuotes,
 } from "@/lib/quote-view";
+
 import type { ProductFilter } from "@/lib/quote-view";
+
 import { Icon } from "@/components/icon";
+
 import { RoutePreview } from "@/components/route-preview";
+
 import { mapCoordinateLabel } from "@/lib/map-selection";
 
 const DestinationPicker = dynamic(
@@ -56,108 +71,180 @@ const scenarios: {
   { id: "outage", label: "One unavailable", icon: "info" },
 ];
 
+/** Coordinate trip selection, cancellation, quote freshness and the comparison screen. */
 export default function Home() {
   const [locations, setLocations] = useState<Location[]>([]);
+
   const [trip, setTrip] = useState<TripRequest>(initialTrip);
+
   const [comparison, setComparison] = useState<Comparison | null>(null);
+
   const [comparedTrip, setComparedTrip] = useState<TripRequest | null>(null);
+
   const [loading, setLoading] = useState(true);
+
   const [error, setError] = useState("");
+
   const [locating, setLocating] = useState(false);
+
   const [locatingEndpoint, setLocatingEndpoint] = useState<Endpoint | null>(
     null,
   );
+
   const [routingSource, setRoutingSource] =
     useState<RoutingSource>("approximate");
+
   const [locationMessage, setLocationMessage] = useState("");
+
   const [locationError, setLocationError] = useState("");
+
   const [mapOpen, setMapOpen] = useState(false);
+
   const [devicePositions, setDevicePositions] = useState<
     Record<Endpoint, DevicePosition | null>
   >({ pickup: null, dropoff: null });
+
   const locationAttempt = useRef(0);
+
   const activeLocation = useRef<AbortController | null>(null);
+
   const [sort, setSort] = useState("price");
+
   const [product, setProduct] = useState<ProductFilter>("standard");
+
   const [detail, setDetail] = useState<Quote | "about" | null>(null);
+
   const [now, setNow] = useState(0);
+
   const activeRequest = useRef<AbortController | null>(null);
+
   const dialog = useRef<HTMLDialogElement>(null);
 
+  // Initialize the catalog and comparison together; cancel both when the screen unmounts.
   useEffect(() => {
     const controller = new AbortController();
+
     activeRequest.current = controller;
+
     async function init() {
       try {
         const catalog = await fetchLocations(controller.signal);
-        if (controller.signal.aborted) return;
+
+        if (controller.signal.aborted) {
+          return;
+        }
+
         setLocations(catalog.locations);
+
         setRoutingSource(catalog.routingSource);
+
         const result = await compareTrip(initialTrip, controller.signal);
-        if (controller.signal.aborted) return;
+
+        if (controller.signal.aborted) {
+          return;
+        }
+
         setComparison(result);
+
         setComparedTrip(initialTrip);
+
         setNow(Date.now());
       } catch (err) {
-        if (!controller.signal.aborted)
+        if (!controller.signal.aborted) {
           setError(
             err instanceof Error
               ? err.message
               : "Could not load your comparison.",
           );
+        }
       } finally {
-        if (!controller.signal.aborted) setLoading(false);
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
       }
     }
+
     void init();
+
     const tick = setInterval(() => setNow(Date.now()), 1000);
+
     return () => {
       activeRequest.current?.abort();
+
       activeLocation.current?.abort();
+
       locationAttempt.current += 1;
+
       clearInterval(tick);
     };
   }, []);
 
   useEffect(() => {
-    if (detail && !dialog.current?.open) dialog.current?.showModal();
-    if (!detail) dialog.current?.close();
+    if (detail && !dialog.current?.open) {
+      dialog.current?.showModal();
+    }
+
+    if (!detail) {
+      dialog.current?.close();
+    }
   }, [detail]);
 
+  // Capture each endpoint separately and ignore a lookup superseded by a newer selection.
   async function useCurrentLocation(endpoint: Endpoint) {
     const attempt = ++locationAttempt.current;
+
     const controller = new AbortController();
+
     activeLocation.current?.abort();
+
     activeLocation.current = controller;
+
     setLocating(true);
+
     setLocatingEndpoint(endpoint);
+
     setLocationError("");
+
     setLocationMessage(
       "Waiting for location permission and a device position…",
     );
+
     try {
       const coordinates = await getDeviceCoordinates();
-      if (locationAttempt.current !== attempt) return;
+
+      if (locationAttempt.current !== attempt) {
+        return;
+      }
+
       setLocationMessage(
         `Setting your ${endpoint === "pickup" ? "pickup" : "drop-off"} location…`,
       );
+
       const { location } = await resolveCurrentLocation(
         coordinates,
         controller.signal,
       );
-      if (locationAttempt.current !== attempt) return;
+
+      if (locationAttempt.current !== attempt) {
+        return;
+      }
+
       setDevicePositions((p) => ({
         ...p,
         [endpoint]: { location, coordinates },
       }));
+
       setTrip((t) => withDeviceLocation(t, endpoint, coordinates));
+
       const accuracy = coordinates.accuracyMeters;
+
       setLocationMessage(
         `Current location selected for ${endpoint === "pickup" ? "pickup" : "drop-off"}${accuracy === undefined ? "" : ` · accuracy about ${Math.round(accuracy)} m`}. Compare rides to update.`,
       );
     } catch (err) {
       if (locationAttempt.current === attempt && !controller.signal.aborted) {
         setLocationMessage("");
+
         setLocationError(
           err instanceof Error
             ? err.message
@@ -167,16 +254,22 @@ export default function Home() {
     } finally {
       if (locationAttempt.current === attempt) {
         setLocating(false);
+
         setLocatingEndpoint(null);
       }
     }
   }
 
+  // Cancel network work and invalidate callbacks from the previous browser location request.
   function cancelLocationLookup() {
     locationAttempt.current += 1;
+
     activeLocation.current?.abort();
+
     setLocating(false);
+
     setLocatingEndpoint(null);
+
     setLocationMessage(
       "Location request canceled. You can choose a location manually.",
     );
@@ -185,58 +278,90 @@ export default function Home() {
   const pickupOptions = devicePositions.pickup
     ? [devicePositions.pickup.location, ...locations]
     : locations;
+
   const dropoffOptions = devicePositions.dropoff
     ? [devicePositions.dropoff.location, ...locations]
     : locations;
 
+  // Replace any earlier comparison so only the latest selected trip updates the screen.
   async function compare(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
-    if (locating || sameEndpoints(trip, locations)) return;
+
+    if (locating || sameEndpoints(trip, locations)) {
+      return;
+    }
+
     activeRequest.current?.abort();
+
     const controller = new AbortController();
+
     activeRequest.current = controller;
+
     setLoading(true);
+
     setError("");
+
     const submittedTrip = { ...trip };
+
     try {
       if (!locations.length) {
         const catalog = await fetchLocations(controller.signal);
+
         setLocations(catalog.locations);
+
         setRoutingSource(catalog.routingSource);
       }
+
       const result = await compareTrip(submittedTrip, controller.signal);
-      if (controller.signal.aborted) return;
+
+      if (controller.signal.aborted) {
+        return;
+      }
+
       setComparison(result);
+
       setComparedTrip(submittedTrip);
+
       setNow(Date.now());
     } catch (err) {
-      if (!controller.signal.aborted)
+      if (!controller.signal.aborted) {
         setError(
           err instanceof Error ? err.message : "Could not compare this trip.",
         );
+      }
     } finally {
-      if (!controller.signal.aborted) setLoading(false);
+      if (!controller.signal.aborted) {
+        setLoading(false);
+      }
     }
   }
 
   const dirty =
     comparedTrip !== null &&
     JSON.stringify(trip) !== JSON.stringify(comparedTrip);
+
   const expired =
     comparison !== null && now >= Date.parse(comparison.expiresAt);
+
   const quotes = useMemo(
     () => sortedQuotes(comparison?.quotes ?? [], product, sort, now),
     [comparison, product, sort, now],
   );
-  const available = quotes.filter((q) => priced(q, now));
+
+  const available = quotes.filter((quote) => priced(quote, now));
+
   const cheapest = lowestQuote(quotes, product, now);
-  const hasRanges = available.some((q) => q.fare!.isEstimateRange);
+
+  const hasRanges = available.some((quote) => quote.fare!.isEstimateRange);
+
   const savings =
     cheapest && !hasRanges && available.length > 1
-      ? Math.max(...available.map((q) => q.fare!.maxFare)) -
+      ? Math.max(...available.map((quote) => quote.fare!.maxFare)) -
         cheapest.fare!.minFare
       : 0;
+
   const invalid = sameEndpoints(trip, locations);
+
   const changePassengers = (value: number) =>
     setTrip((t) => ({
       ...t,
@@ -244,8 +369,12 @@ export default function Home() {
       rideType: value > 4 ? "six" : t.rideType,
     }));
 
+  // Carry a temporary trip draft to the logger; this action does not save an observation.
   function logRealFare() {
-    if (!comparedTrip || !comparison || dirty) return;
+    if (!comparedTrip || !comparison || dirty) {
+      return;
+    }
+
     sessionStorage.setItem(
       "farewise-observation-draft",
       JSON.stringify({
@@ -254,6 +383,7 @@ export default function Home() {
         dropoffLabel: comparison.trip.dropoff.name,
       }),
     );
+
     window.location.assign("/observations");
   }
 
@@ -366,15 +496,17 @@ export default function Home() {
                           ? devicePositions.pickup?.coordinates
                           : undefined,
                       }));
+
                       setLocationError("");
+
                       setLocationMessage("");
                     }}
                     disabled={locating || (loading && !locations.length)}
                   >
                     {pickupOptions.length ? (
-                      pickupOptions.map((l) => (
-                        <option key={l.id} value={l.id}>
-                          {l.name}
+                      pickupOptions.map((location) => (
+                        <option key={location.id} value={location.id}>
+                          {location.name}
                         </option>
                       ))
                     ) : (
@@ -391,11 +523,14 @@ export default function Home() {
                   disabled={locating}
                   onClick={() => {
                     setTrip(swapTrip);
+
                     setDevicePositions((p) => ({
                       pickup: p.dropoff,
                       dropoff: p.pickup,
                     }));
+
                     setLocationMessage("");
+
                     setLocationError("");
                   }}
                 >
@@ -431,9 +566,9 @@ export default function Home() {
                     disabled={locating || (loading && !locations.length)}
                   >
                     {dropoffOptions.length ? (
-                      dropoffOptions.map((l) => (
-                        <option key={l.id} value={l.id}>
-                          {l.name}
+                      dropoffOptions.map((location) => (
+                        <option key={location.id} value={location.id}>
+                          {location.name}
                         </option>
                       ))
                     ) : (
@@ -585,14 +720,16 @@ export default function Home() {
                     value={product}
                     onChange={(e) => {
                       const selected = e.target.value;
+
                       if (
                         selected === "all" ||
                         selected === "standard" ||
                         selected === "premium" ||
                         selected === "pool" ||
                         selected === "taxi"
-                      )
+                      ) {
                         setProduct(selected);
+                      }
                     }}
                   >
                     <option value="standard">Standard</option>
@@ -683,9 +820,12 @@ export default function Home() {
                     const best =
                       cheapest !== null &&
                       quoteKey(quote) === quoteKey(cheapest);
+
                     const isExpired = quoteExpired(quote, now);
+
                     const unavailable =
                       quote.status === "unavailable" || isExpired;
+
                     return (
                       <article
                         key={quoteKey(quote)}
@@ -843,11 +983,15 @@ export default function Home() {
               ...positions,
               dropoff: { location, coordinates },
             }));
+
             setTrip((t) => withMapLocation(t, coordinates));
+
             setLocationError("");
+
             setLocationMessage(
               "Map destination selected. Compare rides to update.",
             );
+
             setMapOpen(false);
           }}
         />

@@ -607,6 +607,16 @@ docs/images/                Desktop and iPhone screenshots
 Farewise.code-workspace      Portable VS Code workspace
 ```
 
+For a code review, follow a request through these files:
+
+1. `backend/internal/fare/models.go` defines the trip, quote and provider data. `service.go`, `providers.go` and `protection.go` then validate trips, generate demo products and protect provider calls.
+2. `backend/internal/routing/onemap.go`, `lta.go` and `traffic_estimate.go` resolve a driving route and enrich its duration with available traffic data.
+3. `backend/internal/api/handler.go` decodes comparison requests and joins the route and fare services. `observations.go` handles capture, save, edit, list and export requests.
+4. `backend/internal/observations/models.go` defines manual-fare input and quality flags; `postgres.go` stores records and snapshots; `csv.go` produces the export.
+5. `frontend/src/lib/contracts.ts` and `observations.ts` validate backend responses. The pages under `frontend/src/app/` manage trip selection and the observation dashboard.
+
+Go files use `gofmt`; frontend files use Prettier. The applied observation SQL migration is checksummed by the database, so later schema changes should use a new migration instead of reformatting that file.
+
 ## Next steps
 
 - [ ] Confirm permitted passenger-fare access and comparison-use rights for each provider.

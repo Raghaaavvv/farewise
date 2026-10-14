@@ -2,8 +2,9 @@
 package fare
 
 import (
-	"farewise/backend/internal/routing"
 	"time"
+
+	"farewise/backend/internal/routing"
 )
 
 type Location struct {
@@ -16,23 +17,79 @@ type Location struct {
 
 // These are approximate demo points, not a geocoding API or pickup instructions.
 var Locations = []Location{
-	{"changi-t3", "Changi Airport · Terminal 3", "Airport pickup · illustrative point", 1.3570, 103.9870},
-	{"changi-t1", "Changi Airport · Terminal 1", "Airport pickup · illustrative point", 1.3640, 103.9910},
-	{"jewel", "Jewel Changi Airport", "Airport boulevard", 1.3600, 103.9890},
-	{"orchard", "ION Orchard", "Orchard Road", 1.3040, 103.8320},
-	{"tampines", "Tampines Mall", "Tampines Central", 1.3520, 103.9450},
-	{"marina", "Marina Bay Sands", "Bayfront Avenue", 1.2830, 103.8600},
-	{"jurong", "JEM · Jurong East", "Jurong Gateway Road", 1.3330, 103.7430},
-	{"woodlands", "Causeway Point", "Woodlands Square", 1.4360, 103.7860},
-	{"serangoon", "NEX · Serangoon", "Serangoon Central", 1.3500, 103.8720},
+	{
+		"changi-t3",
+		"Changi Airport · Terminal 3",
+		"Airport pickup · illustrative point",
+		1.3570,
+		103.9870,
+	},
+	{
+		"changi-t1",
+		"Changi Airport · Terminal 1",
+		"Airport pickup · illustrative point",
+		1.3640,
+		103.9910,
+	},
+	{
+		"jewel",
+		"Jewel Changi Airport",
+		"Airport boulevard",
+		1.3600,
+		103.9890,
+	},
+	{
+		"orchard",
+		"ION Orchard",
+		"Orchard Road",
+		1.3040,
+		103.8320,
+	},
+	{
+		"tampines",
+		"Tampines Mall",
+		"Tampines Central",
+		1.3520,
+		103.9450,
+	},
+	{
+		"marina",
+		"Marina Bay Sands",
+		"Bayfront Avenue",
+		1.2830,
+		103.8600,
+	},
+	{
+		"jurong",
+		"JEM · Jurong East",
+		"Jurong Gateway Road",
+		1.3330,
+		103.7430,
+	},
+	{
+		"woodlands",
+		"Causeway Point",
+		"Woodlands Square",
+		1.4360,
+		103.7860,
+	},
+	{
+		"serangoon",
+		"NEX · Serangoon",
+		"Serangoon Central",
+		1.3500,
+		103.8720,
+	},
 }
 
+// FindLocation looks up a preset demo location by its stable identifier.
 func FindLocation(id string) (Location, bool) {
 	for _, location := range Locations {
 		if location.ID == id {
 			return location, true
 		}
 	}
+
 	return Location{}, false
 }
 

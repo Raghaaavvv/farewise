@@ -1,3 +1,4 @@
+// Shared SVG icon definitions; each icon keeps the same accessible decoration behavior.
 import type { CSSProperties } from "react";
 
 type IconName =
@@ -15,6 +16,7 @@ type IconName =
   | "sun"
   | "rain"
   | "bolt";
+
 const paths: Record<IconName, React.ReactNode> = {
   arrow: (
     <>
@@ -78,6 +80,7 @@ const paths: Record<IconName, React.ReactNode> = {
   bolt: <path d="m13 2-9 12h7l-1 8 10-13h-7z" />,
 };
 
+/** Render the requested SVG path with the existing size and decoration attributes. */
 export function Icon({
   name,
   size = 20,

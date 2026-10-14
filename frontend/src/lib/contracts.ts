@@ -9,7 +9,9 @@ export type Location = {
 };
 
 export type ProductType = "standard" | "premium" | "pool" | "taxi";
+
 export type RoutingSource = "approximate" | "onemap";
+
 export type Route = {
   source: RoutingSource;
   distanceMeters: number;
@@ -17,6 +19,7 @@ export type Route = {
   trafficAware: boolean;
   traffic?: TrafficEstimate;
 };
+
 export type TrafficEstimate = {
   source: "lta";
   status: "applied" | "unavailable" | "no_geometry" | "insufficient_coverage";
@@ -38,6 +41,7 @@ export type FareRange = {
   maxFare: number;
   isEstimateRange: boolean;
 };
+
 export type Quote = {
   providerId: string;
   providerName: string;
@@ -79,65 +83,116 @@ export class ResponseValidationError extends Error {
     super(
       "The comparison service returned an invalid response. Please refresh or try again.",
     );
+
     this.name = "ResponseValidationError";
   }
 }
 
+/** Stop parsing an invalid response with the shared, user-facing validation error. */
 function fail(): never {
   throw new ResponseValidationError();
 }
+
+/** Accept plain JSON-like objects and reject arrays or null before reading fields. */
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+/** Require an object before validating its individual response fields. */
 function record(value: unknown) {
-  return isRecord(value) ? value : fail();
+  if (isRecord(value)) {
+    return value;
+  }
+
+  return fail();
 }
+
+/** Validate a bounded string without silently coercing another JSON type. */
 function text(value: unknown, allowEmpty = false): string {
-  return typeof value === "string" &&
+  if (
+    typeof value === "string" &&
     value.length <= 2000 &&
     (allowEmpty || value.trim().length > 0)
-    ? value
-    : fail();
+  ) {
+    return value;
+  }
+
+  return fail();
 }
+
+/** Validate a finite numeric value within the supplied bounds. */
 function number(
   value: unknown,
   min: number,
   max = Number.MAX_SAFE_INTEGER,
 ): number {
-  return typeof value === "number" &&
+  if (
+    typeof value === "number" &&
     Number.isFinite(value) &&
     value >= min &&
     value <= max
-    ? value
-    : fail();
+  ) {
+    return value;
+  }
+
+  return fail();
 }
+
+/** Require an exact safe integer after validating its numeric range. */
 function integer(
   value: unknown,
   min: number,
   max = Number.MAX_SAFE_INTEGER,
 ): number {
   const result = number(value, min, max);
-  return Number.isSafeInteger(result) ? result : fail();
+
+  if (Number.isSafeInteger(result)) {
+    return result;
+  }
+
+  return fail();
 }
+
+/** Require a real JSON boolean rather than a truthy substitute. */
 function boolean(value: unknown): boolean {
-  return typeof value === "boolean" ? value : fail();
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  return fail();
 }
+
+/** Accept only one of the supported string values. */
 function choice<const T extends readonly string[]>(
   value: unknown,
   values: T,
 ): T[number] {
-  for (const allowed of values) if (allowed === value) return allowed;
+  for (const allowed of values) {
+    if (allowed === value) {
+      return allowed;
+    }
+  }
+
   return fail();
 }
+
+/** Validate an explicit timestamp, including its calendar values and timezone. */
 function timestamp(value: unknown): string {
   const result = text(value);
+
   const match =
     /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/.exec(
       result,
     );
-  if (!match || !Number.isFinite(Date.parse(result))) return fail();
+
+  if (!match || !Number.isFinite(Date.parse(result))) {
+    return fail();
+  }
+
   const [, year, month, day, hour, minute, second] = match;
+
   const days = new Date(Date.UTC(Number(year), Number(month), 0)).getUTCDate();
+
   if (
     Number(month) < 1 ||
     Number(month) > 12 ||
@@ -146,16 +201,26 @@ function timestamp(value: unknown): string {
     Number(hour) > 23 ||
     Number(minute) > 59 ||
     Number(second) > 59
-  )
+  ) {
     return fail();
+  }
+
   return result;
 }
+
+/** Request a filtered page of observations with its collection-wide coverage statistics. */
 function list(value: unknown, max: number): unknown[] {
-  return Array.isArray(value) && value.length <= max ? value : fail();
+  if (Array.isArray(value) && value.length <= max) {
+    return value;
+  }
+
+  return fail();
 }
 
+/** Validate a location label and bounded latitude/longitude pair. */
 export function parseLocation(value: unknown): Location {
   const obj = record(value);
+
   return {
     id: text(obj.id),
     name: text(obj.name),
@@ -165,36 +230,63 @@ export function parseLocation(value: unknown): Location {
   };
 }
 
+/** Validate integer-cent bounds and their point-versus-range flag. */
 function parseFare(value: unknown): FareRange | null {
-  if (value === null) return null;
+  if (value === null) {
+    return null;
+  }
+
   const obj = record(value);
-  const minFare = integer(obj.minFare, 0),
-    maxFare = integer(obj.maxFare, minFare);
+
+  const minFare = integer(obj.minFare, 0);
+
+  const maxFare = integer(obj.maxFare, minFare);
+
   const isEstimateRange = boolean(obj.isEstimateRange);
-  if (isEstimateRange !== (minFare !== maxFare)) return fail();
+
+  if (isEstimateRange !== (minFare !== maxFare)) {
+    return fail();
+  }
+
   return { minFare, maxFare, isEstimateRange };
 }
 
+/** Validate a product quote and the fields required by its availability status. */
 export function parseQuote(value: unknown): Quote {
   const obj = record(value);
+
   const fare = parseFare(obj.fare);
+
   const etaMinutes =
     obj.etaMinutes === null ? null : integer(obj.etaMinutes, 0);
+
   const status = choice(obj.status, [
     "available",
     "partial",
     "unavailable",
     "expired",
   ]);
-  if (status === "available" && (fare === null || etaMinutes === null))
+
+  if (status === "available" && (fare === null || etaMinutes === null)) {
     return fail();
-  if (status === "partial" && !((fare === null) !== (etaMinutes === null)))
+  }
+
+  if (status === "partial" && !((fare === null) !== (etaMinutes === null))) {
     return fail();
-  if (status === "unavailable" && (fare !== null || etaMinutes !== null))
+  }
+
+  if (status === "unavailable" && (fare !== null || etaMinutes !== null)) {
     return fail();
-  const fetchedAt = timestamp(obj.fetchedAt),
-    expiresAt = timestamp(obj.expiresAt);
-  if (Date.parse(expiresAt) <= Date.parse(fetchedAt)) return fail();
+  }
+
+  const fetchedAt = timestamp(obj.fetchedAt);
+
+  const expiresAt = timestamp(obj.expiresAt);
+
+  if (Date.parse(expiresAt) <= Date.parse(fetchedAt)) {
+    return fail();
+  }
+
   return {
     providerId: text(obj.providerId),
     providerName: text(obj.providerName),
@@ -220,25 +312,50 @@ export function parseQuote(value: unknown): Quote {
   };
 }
 
+/** Validate the trip, products and comparison timing as one consistent response. */
 export function parseComparison(value: unknown): Comparison {
-  const obj = record(value),
-    trip = record(obj.trip);
+  const obj = record(value);
+
+  const trip = record(obj.trip);
+
   const passengers = integer(trip.passengers, 1, 6);
+
   const rideType = choice(trip.rideType, ["standard", "six"]);
-  if (passengers > 4 && rideType !== "six") return fail();
+
+  if (passengers > 4 && rideType !== "six") {
+    return fail();
+  }
+
   const quotes = list(obj.quotes, 256).map(parseQuote);
+
   const keys = new Set<string>();
+
   for (const quote of quotes) {
     const key = JSON.stringify([quote.providerId, quote.productId]);
-    if (keys.has(key)) return fail();
+
+    if (keys.has(key)) {
+      return fail();
+    }
+
     keys.add(key);
   }
-  const collectedAt = timestamp(obj.collectedAt),
-    expiresAt = timestamp(obj.expiresAt);
-  if (Date.parse(expiresAt) <= Date.parse(collectedAt)) return fail();
+
+  const collectedAt = timestamp(obj.collectedAt);
+
+  const expiresAt = timestamp(obj.expiresAt);
+
+  if (Date.parse(expiresAt) <= Date.parse(collectedAt)) {
+    return fail();
+  }
+
   const route = parseRoute(trip.route);
+
   const distanceKm = number(trip.distanceKm, 0);
-  if (Math.abs(distanceKm - route.distanceMeters / 1000) > 1e-9) return fail();
+
+  if (Math.abs(distanceKm - route.distanceMeters / 1000) > 1e-9) {
+    return fail();
+  }
+
   return {
     mode: choice(obj.mode, ["demo"]),
     notice: text(obj.notice),
@@ -257,39 +374,59 @@ export function parseComparison(value: unknown): Comparison {
   };
 }
 
+/** Validate speed-band timing, coverage and freshness relationships. */
 function parseTraffic(value: unknown, distance: number): TrafficEstimate {
   const obj = record(value);
+
   const status = choice(obj.status, [
     "applied",
     "unavailable",
     "no_geometry",
     "insufficient_coverage",
   ]);
+
   const nullableNumber = (v: unknown) =>
     v === null ? null : number(v, 0, 86400);
+
   const estimatedSeconds = nullableNumber(obj.estimatedSeconds);
+
   const minSeconds = nullableNumber(obj.minSeconds);
+
   const maxSeconds = nullableNumber(obj.maxSeconds);
+
   const observedAt = obj.observedAt === null ? null : timestamp(obj.observedAt);
+
   const fetchedAt = obj.fetchedAt === null ? null : timestamp(obj.fetchedAt);
+
   const expiresAt = obj.expiresAt === null ? null : timestamp(obj.expiresAt);
+
   const coverage = number(obj.coverage, 0, 1);
+
   const matchedMeters = number(obj.matchedMeters, 0, distance);
+
   const matchedLinks = integer(obj.matchedLinks, 0, 150000);
-  if (Math.abs(matchedMeters - distance * coverage) > 0.01) return fail();
+
+  if (Math.abs(matchedMeters - distance * coverage) > 0.01) {
+    return fail();
+  }
+
   if (
     (observedAt === null) !== (fetchedAt === null) ||
     (fetchedAt === null) !== (expiresAt === null)
-  )
+  ) {
     return fail();
+  }
+
   if (
     fetchedAt &&
     expiresAt &&
     observedAt &&
     (Date.parse(expiresAt) <= Date.parse(fetchedAt) ||
       Date.parse(observedAt) > Date.parse(fetchedAt) + 60000)
-  )
+  ) {
     return fail();
+  }
+
   if (status === "applied") {
     if (
       coverage < 0.2 ||
@@ -300,14 +437,17 @@ function parseTraffic(value: unknown, distance: number): TrafficEstimate {
       minSeconds > estimatedSeconds ||
       estimatedSeconds > maxSeconds ||
       observedAt === null
-    )
+    ) {
       return fail();
+    }
   } else if (
     estimatedSeconds !== null ||
     minSeconds !== null ||
     maxSeconds !== null
-  )
+  ) {
     return fail();
+  }
+
   return {
     source: choice(obj.source, ["lta"]),
     status,
@@ -325,30 +465,44 @@ function parseTraffic(value: unknown, distance: number): TrafficEstimate {
   };
 }
 
+/** Validate route distance, duration and optional traffic data without assuming a live ETA. */
 export function parseRoute(value: unknown): Route {
   const obj = record(value);
+
   const source = choice(obj.source, ["approximate", "onemap"]);
+
   const distanceMeters = number(obj.distanceMeters, 0);
+
   const durationSeconds =
     obj.durationSeconds === null ? null : number(obj.durationSeconds, 0);
+
   const trafficAware = boolean(obj.trafficAware);
+
   const traffic =
     obj.traffic === undefined
       ? undefined
       : parseTraffic(obj.traffic, distanceMeters);
+
   if (
     (source === "onemap" && durationSeconds === null) ||
     (source === "approximate" &&
       (durationSeconds !== null || trafficAware || traffic))
-  )
+  ) {
     return fail();
-  if (trafficAware !== (traffic?.status === "applied")) return fail();
+  }
+
+  if (trafficAware !== (traffic?.status === "applied")) {
+    return fail();
+  }
+
   if (
     traffic &&
     durationSeconds !==
       (trafficAware ? traffic.estimatedSeconds : traffic.baselineSeconds)
-  )
+  ) {
     return fail();
+  }
+
   return {
     source,
     distanceMeters,
@@ -358,48 +512,63 @@ export function parseRoute(value: unknown): Route {
   };
 }
 
+/** Validate the location catalog and its routing-source declaration. */
 export function parseLocations(value: unknown) {
   const obj = record(value);
+
   const locations = list(obj.locations, 1000).map(parseLocation);
+
   if (
     new Set(locations.map((location) => location.id)).size !== locations.length
-  )
+  ) {
     return fail();
+  }
+
   return {
     locations,
     routingSource: choice(obj.routingSource, ["approximate", "onemap"]),
   };
 }
 
+/** Validate a device-location response and its non-persisted provenance. */
 export function parseCurrentLocation(value: unknown): {
   location: Location;
   source: "device";
   persisted: false;
 } {
-  const obj = record(value),
-    location = parseLocation(obj.location);
+  const obj = record(value);
+
+  const location = parseLocation(obj.location);
+
   if (
     obj.source !== "device" ||
     obj.persisted !== false ||
     location.id !== "current-location"
-  )
+  ) {
     return fail();
+  }
+
   return { location, source: "device", persisted: false };
 }
 
+/** Validate a map-location response and its non-persisted provenance. */
 export function parseMapLocation(value: unknown): {
   location: Location;
   source: "map";
   persisted: false;
 } {
-  const obj = record(value),
-    location = parseLocation(obj.location);
+  const obj = record(value);
+
+  const location = parseLocation(obj.location);
+
   if (
     obj.source !== "map" ||
     obj.persisted !== false ||
     location.id !== "map-location"
-  )
+  ) {
     return fail();
+  }
+
   return { location, source: "map", persisted: false };
 }
 

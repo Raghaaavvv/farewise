@@ -1,4 +1,11 @@
 {
-  "folders": [{ "name": "Farewise · Go + Next.js", "path": "." }],
-  "settings": { "window.title": "Farewise — ${activeEditorShort}" }
+  "folders": [
+    {
+      "name": "Farewise · Go + Next.js",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "window.title": "Farewise — ${activeEditorShort}"
+  }
 }

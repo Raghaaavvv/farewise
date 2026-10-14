@@ -1,5 +1,8 @@
+// Check manual prices, Singapore times, snapshot provenance and observation API cancellation.
 import assert from "node:assert/strict";
+
 import test from "node:test";
+
 import {
   parsePrice,
   singaporeInput,
@@ -11,8 +14,11 @@ import {
   capture,
   save,
 } from "../src/lib/observations";
+
 import { ResponseValidationError } from "../src/lib/contracts";
+
 const session = "11111111-1111-4111-8111-111111111111";
+
 const location = {
   id: "current-location",
   name: "Test pickup",
@@ -20,6 +26,7 @@ const location = {
   latitude: 1.3,
   longitude: 103.8,
 };
+
 const snapshot = {
   id: session,
   capturedAt: "2026-10-14T10:00:00Z",
@@ -48,6 +55,7 @@ const snapshot = {
     },
   },
 };
+
 const record = {
   id: "22222222-2222-4222-8222-222222222222",
   sessionId: session,
@@ -70,40 +78,55 @@ const record = {
   singaporeWeekday: 3,
   timeSlot: "evening",
 };
+
 test("observation prices use exact integer cents and reject accidental formats", () => {
   assert.equal(parsePrice("13.50"), 1350);
+
   assert.equal(parsePrice("68"), 6800);
+
   assert.equal(parsePrice("0.01"), 1);
+
   for (const value of ["", "-1", "1e2", "13.501", "abc", "10000.01"]) {
     assert.throws(() => parsePrice(value));
   }
 });
+
 test("observation timestamps always use Singapore time independent of device timezone", () => {
   assert.equal(
     singaporeInput(new Date("2026-10-14T10:00:00Z")),
     "2026-10-14T18:00:00",
   );
+
   assert.equal(singaporeISO("2026-10-14T18:00"), "2026-10-14T10:00:00.000Z");
+
   assert.throws(() => singaporeISO("2026-02-31T18:00"));
 });
+
 test("observation snapshots preserve precise coordinates and independent provenance", () => {
   const s = parseSnapshot(snapshot);
+
   const trip = requestForSnapshot(s);
+
   assert.equal(trip.pickupCoordinates?.longitude, 103.8);
+
   assert.equal(trip.dropoffCoordinates?.longitude, 103.9);
+
   assert.equal(
     parseObservation(record).snapshot.featureVersion,
     "route-traffic-v1",
   );
+
   for (const value of [
     { ...record, sessionId: "33333333-3333-4333-8333-333333333333" },
     { ...record, priceCents: 37.5 },
     { ...record, trainingEligible: false },
     { ...record, fareKind: "paid" },
     { ...record, updatedAt: "2026-10-14T09:00:00Z" },
-  ])
+  ]) {
     assert.throws(() => parseObservation(value), ResponseValidationError);
+  }
 });
+
 test("observation list validates counts and rejects duplicate IDs", () => {
   const page = {
     records: [record],
@@ -118,23 +141,31 @@ test("observation list validates counts and rejects duplicate IDs", () => {
       byWeekday: [{ label: "3", count: 1 }],
     },
   };
+
   assert.equal(parsePage(page).records.length, 1);
+
   assert.throws(
     () => parsePage({ ...page, records: [record, record], total: 2 }),
     ResponseValidationError,
   );
 });
+
 test("observation API forwards cancellation and rejects malformed successful saves", async () => {
   const original = globalThis.fetch;
+
   const controller = new AbortController();
+
   globalThis.fetch = async (url, init) => {
     assert.equal(init?.signal, controller.signal);
+
     assert.equal(init?.method, "POST");
+
     return new Response(
       JSON.stringify(String(url).includes("sessions") ? snapshot : {}),
       { status: 200 },
     );
   };
+
   try {
     await capture(
       {
@@ -147,6 +178,7 @@ test("observation API forwards cancellation and rejects malformed successful sav
       },
       controller.signal,
     );
+
     const input = {
       id: record.id,
       sessionId: session,
@@ -160,6 +192,7 @@ test("observation API forwards cancellation and rejects malformed successful sav
       includedFeesCents: null,
       notes: "",
     };
+
     await assert.rejects(
       save(input, controller.signal),
       ResponseValidationError,

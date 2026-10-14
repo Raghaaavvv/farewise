@@ -1,20 +1,32 @@
 "use client";
 
+// Observation dashboard: capture trip conditions, enter actual fares and review saved records.
+
 import { useEffect, useRef, useState } from "react";
+
 import type { FormEvent } from "react";
+
 import Link from "next/link";
+
 import dynamic from "next/dynamic";
+
 import {
   fetchLocations,
   initialTrip,
   money,
   resolveCurrentLocation,
 } from "@/lib/api";
+
 import type { Location, TripRequest } from "@/lib/api";
+
 import { getDeviceCoordinates } from "@/lib/geolocation";
+
 import { RoutePreview } from "@/components/route-preview";
+
 import { Icon } from "@/components/icon";
+
 import * as observations from "@/lib/observations";
+
 import type {
   Fields,
   Observation,
@@ -23,12 +35,14 @@ import type {
   Zone,
   Provider,
 } from "@/lib/observations";
+
 import { isRecord } from "@/lib/contracts";
 
 const DestinationPicker = dynamic(
   () => import("@/components/destination-picker"),
   { ssr: false },
 );
+
 const emptyFields = {
   provider: "grab" as Provider,
   product: "",
@@ -40,6 +54,7 @@ const emptyFields = {
   fees: "",
   notes: "",
 };
+
 const dateLabel = (value: string) =>
   new Intl.DateTimeFormat("en-SG", {
     timeZone: "Asia/Singapore",
@@ -49,45 +64,83 @@ const dateLabel = (value: string) =>
     minute: "2-digit",
   }).format(new Date(value));
 
+/** Coordinate capture, manual entry, corrections and collection browsing on the dashboard. */
 export default function ObservationsPage() {
-  const [enabled, setEnabled] = useState(false),
-    [starting, setStarting] = useState(true);
-  const [locations, setLocations] = useState<Location[]>([]),
-    [trip, setTrip] = useState<TripRequest>(initialTrip);
-  const [pickupLabel, setPickupLabel] = useState(""),
-    [dropoffLabel, setDropoffLabel] = useState("");
-  const [pickupZone, setPickupZone] = useState<Zone>("unknown"),
-    [dropoffZone, setDropoffZone] = useState<Zone>("unknown");
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null),
-    [fields, setFields] = useState(emptyFields),
-    [editing, setEditing] = useState<Observation | null>(null);
-  const [page, setPage] = useState<Page | null>(null),
-    [providerFilter, setProviderFilter] = useState(""),
-    [query, setQuery] = useState(""),
-    [offset, setOffset] = useState(0);
-  const [capturing, setCapturing] = useState(false),
-    [saving, setSaving] = useState(false),
-    [locating, setLocating] = useState(false),
-    [mapOpen, setMapOpen] = useState(false),
-    [reading, setReading] = useState(false);
-  const [error, setError] = useState(""),
-    [message, setMessage] = useState("");
-  const request = useRef<AbortController | null>(null),
-    readRequest = useRef<AbortController | null>(null);
-  const captureAttempt = useRef<{ key: string; id: string } | null>(null),
-    saveAttempt = useRef<{ key: string; id: string } | null>(null);
+  const [enabled, setEnabled] = useState(false);
+
+  const [starting, setStarting] = useState(true);
+
+  const [locations, setLocations] = useState<Location[]>([]);
+
+  const [trip, setTrip] = useState<TripRequest>(initialTrip);
+
+  const [pickupLabel, setPickupLabel] = useState("");
+
+  const [dropoffLabel, setDropoffLabel] = useState("");
+
+  const [pickupZone, setPickupZone] = useState<Zone>("unknown");
+
+  const [dropoffZone, setDropoffZone] = useState<Zone>("unknown");
+
+  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+
+  const [fields, setFields] = useState(emptyFields);
+
+  const [editing, setEditing] = useState<Observation | null>(null);
+
+  const [page, setPage] = useState<Page | null>(null);
+
+  const [providerFilter, setProviderFilter] = useState("");
+
+  const [query, setQuery] = useState("");
+
+  const [offset, setOffset] = useState(0);
+
+  const [capturing, setCapturing] = useState(false);
+
+  const [saving, setSaving] = useState(false);
+
+  const [locating, setLocating] = useState(false);
+
+  const [mapOpen, setMapOpen] = useState(false);
+
+  const [reading, setReading] = useState(false);
+
+  const [error, setError] = useState("");
+
+  const [message, setMessage] = useState("");
+
+  const request = useRef<AbortController | null>(null);
+
+  const readRequest = useRef<AbortController | null>(null);
+
+  const captureAttempt = useRef<{ key: string; id: string } | null>(null);
+
+  const saveAttempt = useRef<{ key: string; id: string } | null>(null);
+
   const locationAttempt = useRef(0);
+
   const busy = capturing || saving || locating;
 
+  // Load storage status and the catalog, then restore a draft or requested saved capture.
   useEffect(() => {
     const controller = new AbortController();
+
     request.current = controller;
-    setFields((f) => ({ ...f, quotedAt: observations.singaporeInput() }));
+
+    setFields((currentFields) => ({
+      ...currentFields,
+      quotedAt: observations.singaporeInput(),
+    }));
+
     try {
       const raw = sessionStorage.getItem("farewise-observation-draft");
+
       sessionStorage.removeItem("farewise-observation-draft");
+
       if (raw) {
         const draft: unknown = JSON.parse(raw);
+
         if (
           isRecord(draft) &&
           isRecord(draft.trip) &&
@@ -96,77 +149,119 @@ export default function ObservationsPage() {
         ) {
           // This draft is only a form prefill. Go validates every field before capture.
           setTrip(draft.trip as TripRequest);
+
           setPickupLabel(draft.pickupLabel);
+
           setDropoffLabel(draft.dropoffLabel);
         }
       }
     } catch {
       /* A malformed browser draft is ignored; no observation is saved. */
     }
+
     void (async () => {
       try {
         const [catalog, storage] = await Promise.all([
           fetchLocations(controller.signal),
           observations.status(controller.signal),
         ]);
-        if (controller.signal.aborted) return;
+
+        if (controller.signal.aborted) {
+          return;
+        }
+
         setLocations(catalog.locations);
+
         setEnabled(storage.enabled);
+
         setStarting(false);
+
         if (storage.enabled) {
           const savedID = new URLSearchParams(window.location.search).get(
             "session",
           );
+
           if (savedID) {
             const saved = await observations.getSnapshot(
               savedID,
               controller.signal,
             );
-            if (controller.signal.aborted) return;
+
+            if (controller.signal.aborted) {
+              return;
+            }
+
             useSavedTrip(saved);
+
             setSnapshot(saved);
           }
+
           const records = await observations.list("", "", 0, controller.signal);
-          if (!controller.signal.aborted) setPage(records);
+
+          if (!controller.signal.aborted) {
+            setPage(records);
+          }
         }
       } catch (err) {
-        if (!controller.signal.aborted)
+        if (!controller.signal.aborted) {
           setError(
             err instanceof Error ? err.message : "Could not load observations.",
           );
+        }
       } finally {
-        if (!controller.signal.aborted) setStarting(false);
+        if (!controller.signal.aborted) {
+          setStarting(false);
+        }
       }
     })();
+
     return () => {
       locationAttempt.current++;
+
       request.current?.abort();
+
       readRequest.current?.abort();
     };
   }, []);
 
-  function useSavedTrip(s: Snapshot) {
-    setTrip(observations.requestForSnapshot(s));
-    setPickupLabel(s.trip.pickup.name);
-    setDropoffLabel(s.trip.dropoff.name);
-    setPickupZone(s.pickupZone);
-    setDropoffZone(s.dropoffZone);
+  // Reuse the captured endpoints in the form without replacing the saved conditions.
+  function useSavedTrip(capturedSnapshot: Snapshot) {
+    setTrip(observations.requestForSnapshot(capturedSnapshot));
+
+    setPickupLabel(capturedSnapshot.trip.pickup.name);
+
+    setDropoffLabel(capturedSnapshot.trip.dropoff.name);
+
+    setPickupZone(capturedSnapshot.pickupZone);
+
+    setDropoffZone(capturedSnapshot.dropoffZone);
   }
+
+  // A changed trip invalidates the current capture and any in-progress location lookup.
   function changeTrip(next: TripRequest) {
     setTrip(next);
+
     setSnapshot(null);
+
     setMessage("");
+
     captureAttempt.current = null;
   }
+
+  // Keep list reads separate from save/capture requests so cancellation targets the right work.
   async function refresh(
     nextProvider = providerFilter,
     nextQuery = query,
     nextOffset = offset,
   ) {
     readRequest.current?.abort();
+
     const controller = new AbortController();
+
     readRequest.current = controller;
+
     setReading(true);
+
     try {
       const result = await observations.list(
         nextProvider,
@@ -174,95 +269,158 @@ export default function ObservationsPage() {
         nextOffset,
         controller.signal,
       );
+
       if (!controller.signal.aborted) {
         setPage(result);
+
         setOffset(nextOffset);
       }
     } catch (err) {
-      if (!controller.signal.aborted)
+      if (!controller.signal.aborted) {
         setError(
           err instanceof Error ? err.message : "Could not load history.",
         );
+      }
     } finally {
-      if (!controller.signal.aborted) setReading(false);
+      if (!controller.signal.aborted) {
+        setReading(false);
+      }
     }
   }
+
+  // Reuse the attempt ID after a failed response; a successful fresh capture clears it.
   async function captureTrip(event: FormEvent) {
     event.preventDefault();
-    if (busy || editing) return;
+
+    if (busy || editing) {
+      return;
+    }
+
     setError("");
+
     setMessage("");
+
     const input = { trip, pickupLabel, dropoffLabel, pickupZone, dropoffZone };
+
     const key = JSON.stringify(input);
-    if (captureAttempt.current?.key !== key)
+
+    if (captureAttempt.current?.key !== key) {
       captureAttempt.current = { key, id: observations.newID() };
+    }
+
     const controller = new AbortController();
+
     request.current?.abort();
+
     request.current = controller;
+
     setCapturing(true);
+
     try {
       const result = await observations.capture(
         { id: captureAttempt.current!.id, ...input },
         controller.signal,
       );
-      if (controller.signal.aborted) return;
+
+      if (controller.signal.aborted) {
+        return;
+      }
+
       setSnapshot(result);
+
       captureAttempt.current = null;
+
       saveAttempt.current = null;
+
       window.history.replaceState(
         null,
         "",
         `/observations?session=${result.id}`,
       );
+
       setMessage(
         "Trip conditions captured. Check the same trip in your provider app, then enter its fare.",
       );
     } catch (err) {
-      if (!controller.signal.aborted)
+      if (!controller.signal.aborted) {
         setError(
           err instanceof Error ? err.message : "Could not capture this trip.",
         );
+      }
     } finally {
-      if (!controller.signal.aborted) setCapturing(false);
+      if (!controller.signal.aborted) {
+        setCapturing(false);
+      }
     }
   }
+
+  // Ask the browser for permission, then validate the returned pickup point through Go.
   async function locate() {
-    if (busy || editing) return;
+    if (busy || editing) {
+      return;
+    }
+
     const attempt = ++locationAttempt.current;
+
     setLocating(true);
+
     setError("");
+
     const controller = new AbortController();
+
     request.current?.abort();
+
     request.current = controller;
+
     try {
       const point = await getDeviceCoordinates();
-      if (locationAttempt.current !== attempt) return;
-      const result = await resolveCurrentLocation(point, controller.signal);
-      if (controller.signal.aborted || locationAttempt.current !== attempt)
+
+      if (locationAttempt.current !== attempt) {
         return;
+      }
+
+      const result = await resolveCurrentLocation(point, controller.signal);
+
+      if (controller.signal.aborted || locationAttempt.current !== attempt) {
+        return;
+      }
+
       changeTrip({
         ...trip,
         pickupId: result.location.id,
         pickupCoordinates: point,
       });
+
       setPickupLabel("Current location");
     } catch (err) {
-      if (!controller.signal.aborted && locationAttempt.current === attempt)
+      if (!controller.signal.aborted && locationAttempt.current === attempt) {
         setError(
           err instanceof Error
             ? err.message
             : "Could not use current location.",
         );
+      }
     } finally {
-      if (locationAttempt.current === attempt) setLocating(false);
+      if (locationAttempt.current === attempt) {
+        setLocating(false);
+      }
     }
   }
+
+  // Save a new manual fare or submit a revision-checked correction of an existing entry.
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!snapshot || busy) return;
+
+    if (!snapshot || busy) {
+      return;
+    }
+
     setError("");
+
     setMessage("");
+
     let input: Fields;
+
     try {
       input = {
         provider: fields.provider,
@@ -281,15 +439,24 @@ export default function ObservationsPage() {
       setError(
         err instanceof Error ? err.message : "Check the observation fields.",
       );
+
       return;
     }
+
     const key = JSON.stringify({ sessionId: snapshot.id, ...input });
-    if (saveAttempt.current?.key !== key)
+
+    if (saveAttempt.current?.key !== key) {
       saveAttempt.current = { key, id: observations.newID() };
+    }
+
     const controller = new AbortController();
+
     request.current?.abort();
+
     request.current = controller;
+
     setSaving(true);
+
     try {
       const result = editing
         ? await observations.edit(
@@ -301,73 +468,100 @@ export default function ObservationsPage() {
             { id: saveAttempt.current!.id, sessionId: snapshot.id, ...input },
             controller.signal,
           );
-      if (controller.signal.aborted) return;
+
+      if (controller.signal.aborted) {
+        return;
+      }
+
       setMessage(
         `${editing ? "Correction saved" : "Observation saved"}.${result.contextAligned ? "" : " Its time differs from the captured conditions; review it before training."}`,
       );
+
       setEditing(null);
+
       saveAttempt.current = null;
-      setFields((f) => ({
-        ...f,
+
+      setFields((currentFields) => ({
+        ...currentFields,
         price: "",
         fees: "",
         notes: "",
         quotedAt: observations.singaporeInput(),
       }));
+
       await refresh(providerFilter, query, 0);
     } catch (err) {
-      if (!controller.signal.aborted)
+      if (!controller.signal.aborted) {
         setError(
           err instanceof Error
             ? err.message
             : "Could not save this observation.",
         );
+      }
     } finally {
-      if (!controller.signal.aborted) setSaving(false);
+      if (!controller.signal.aborted) {
+        setSaving(false);
+      }
     }
   }
-  function beginEdit(r: Observation) {
-    setEditing(r);
-    setSnapshot(r.snapshot);
-    useSavedTrip(r.snapshot);
+
+  // Prefill manual fields from the record while keeping its immutable trip snapshot.
+  function beginEdit(observation: Observation) {
+    setEditing(observation);
+
+    setSnapshot(observation.snapshot);
+
+    useSavedTrip(observation.snapshot);
+
     setError("");
+
     setMessage(
       "Correcting a saved fare. Its captured trip conditions remain fixed.",
     );
+
     setFields({
-      provider: r.provider,
-      product: r.product,
-      price: (r.priceCents / 100).toFixed(2),
-      fareKind: r.fareKind,
-      quotedAt: observations.singaporeInput(new Date(r.quotedAt)),
-      weather: r.weather,
-      promotion: r.promotion,
+      provider: observation.provider,
+      product: observation.product,
+      price: (observation.priceCents / 100).toFixed(2),
+      fareKind: observation.fareKind,
+      quotedAt: observations.singaporeInput(new Date(observation.quotedAt)),
+      weather: observation.weather,
+      promotion: observation.promotion,
       fees:
-        r.includedFeesCents === null
+        observation.includedFeesCents === null
           ? ""
-          : (r.includedFeesCents / 100).toFixed(2),
-      notes: r.notes,
+          : (observation.includedFeesCents / 100).toFixed(2),
+      notes: observation.notes,
     });
+
     document
       .getElementById("fare-form")
       ?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
-  const lookup = (id: string) => locations.find((l) => l.id === id);
+
+  const lookup = (id: string) =>
+    locations.find((location) => location.id === id);
+
   const customPickup = ["current-location", "map-location"].includes(
-      trip.pickupId,
-    ),
-    customDropoff = ["current-location", "map-location"].includes(
-      trip.dropoffId,
-    );
+    trip.pickupId,
+  );
+
+  const customDropoff = ["current-location", "map-location"].includes(
+    trip.dropoffId,
+  );
+
   const coordinateNote = snapshot
     ? `${dateLabel(snapshot.capturedAt)} SGT · ${snapshot.trip.route.source === "onemap" ? "OneMap driving route" : "Approximate demo route"}`
     : "";
+
   const timeGap =
     snapshot && fields.quotedAt
       ? new Date(`${fields.quotedAt}+08:00`).getTime() -
         Date.parse(snapshot.capturedAt)
       : 0;
+
   const mismatch = !!snapshot && (timeGap < -60000 || timeGap > 300000);
+
   const exportQuery = new URLSearchParams({
     provider: providerFilter,
     q: query,
@@ -481,6 +675,7 @@ export default function ObservationsPage() {
                           pickupId: e.target.value,
                           pickupCoordinates: undefined,
                         });
+
                         setPickupLabel(lookup(e.target.value)?.name ?? "");
                       }}
                     >
@@ -489,9 +684,9 @@ export default function ObservationsPage() {
                           {pickupLabel || "Selected coordinates"}
                         </option>
                       )}
-                      {locations.map((l) => (
-                        <option key={l.id} value={l.id}>
-                          {l.name}
+                      {locations.map((location) => (
+                        <option key={location.id} value={location.id}>
+                          {location.name}
                         </option>
                       ))}
                     </select>
@@ -505,6 +700,7 @@ export default function ObservationsPage() {
                       value={pickupLabel}
                       onChange={(e) => {
                         setPickupLabel(e.target.value);
+
                         setSnapshot(null);
                       }}
                     />
@@ -527,6 +723,7 @@ export default function ObservationsPage() {
                           dropoffId: e.target.value,
                           dropoffCoordinates: undefined,
                         });
+
                         setDropoffLabel(lookup(e.target.value)?.name ?? "");
                       }}
                     >
@@ -535,9 +732,9 @@ export default function ObservationsPage() {
                           {dropoffLabel || "Selected coordinates"}
                         </option>
                       )}
-                      {locations.map((l) => (
-                        <option key={l.id} value={l.id}>
-                          {l.name}
+                      {locations.map((location) => (
+                        <option key={location.id} value={location.id}>
+                          {location.name}
                         </option>
                       ))}
                     </select>
@@ -551,6 +748,7 @@ export default function ObservationsPage() {
                       value={dropoffLabel}
                       onChange={(e) => {
                         setDropoffLabel(e.target.value);
+
                         setSnapshot(null);
                       }}
                     />
@@ -562,6 +760,7 @@ export default function ObservationsPage() {
                           value={pickupZone}
                           onChange={(e) => {
                             setPickupZone(e.target.value as Zone);
+
                             setSnapshot(null);
                           }}
                         >
@@ -579,6 +778,7 @@ export default function ObservationsPage() {
                           value={dropoffZone}
                           onChange={(e) => {
                             setDropoffZone(e.target.value as Zone);
+
                             setSnapshot(null);
                           }}
                         >
@@ -598,6 +798,7 @@ export default function ObservationsPage() {
                           value={trip.passengers}
                           onChange={(e) => {
                             const n = Number(e.target.value);
+
                             changeTrip({
                               ...trip,
                               passengers: n,
@@ -687,8 +888,8 @@ export default function ObservationsPage() {
                           id="obs-provider"
                           value={fields.provider}
                           onChange={(e) =>
-                            setFields((f) => ({
-                              ...f,
+                            setFields((currentFields) => ({
+                              ...currentFields,
                               provider: e.target.value as Provider,
                             }))
                           }
@@ -706,8 +907,8 @@ export default function ObservationsPage() {
                           id="obs-kind"
                           value={fields.fareKind}
                           onChange={(e) =>
-                            setFields((f) => ({
-                              ...f,
+                            setFields((currentFields) => ({
+                              ...currentFields,
                               fareKind: e.target.value as Fields["fareKind"],
                             }))
                           }
@@ -725,7 +926,10 @@ export default function ObservationsPage() {
                       placeholder="e.g. JustGrab or GrabCar"
                       value={fields.product}
                       onChange={(e) =>
-                        setFields((f) => ({ ...f, product: e.target.value }))
+                        setFields((currentFields) => ({
+                          ...currentFields,
+                          product: e.target.value,
+                        }))
                       }
                     />
                     <div className="observation-form-grid">
@@ -738,7 +942,10 @@ export default function ObservationsPage() {
                           placeholder="0.00"
                           value={fields.price}
                           onChange={(e) =>
-                            setFields((f) => ({ ...f, price: e.target.value }))
+                            setFields((currentFields) => ({
+                              ...currentFields,
+                              price: e.target.value,
+                            }))
                           }
                         />
                       </div>
@@ -752,7 +959,10 @@ export default function ObservationsPage() {
                           placeholder="Unknown"
                           value={fields.fees}
                           onChange={(e) =>
-                            setFields((f) => ({ ...f, fees: e.target.value }))
+                            setFields((currentFields) => ({
+                              ...currentFields,
+                              fees: e.target.value,
+                            }))
                           }
                         />
                       </div>
@@ -763,8 +973,8 @@ export default function ObservationsPage() {
                         className="use-location-button"
                         type="button"
                         onClick={() =>
-                          setFields((f) => ({
-                            ...f,
+                          setFields((currentFields) => ({
+                            ...currentFields,
                             quotedAt: observations.singaporeInput(),
                           }))
                         }
@@ -779,7 +989,10 @@ export default function ObservationsPage() {
                       required
                       value={fields.quotedAt}
                       onChange={(e) =>
-                        setFields((f) => ({ ...f, quotedAt: e.target.value }))
+                        setFields((currentFields) => ({
+                          ...currentFields,
+                          quotedAt: e.target.value,
+                        }))
                       }
                     />
                     {mismatch && (
@@ -796,8 +1009,8 @@ export default function ObservationsPage() {
                           id="obs-weather"
                           value={fields.weather}
                           onChange={(e) =>
-                            setFields((f) => ({
-                              ...f,
+                            setFields((currentFields) => ({
+                              ...currentFields,
                               weather: e.target.value as Fields["weather"],
                             }))
                           }
@@ -813,8 +1026,8 @@ export default function ObservationsPage() {
                           id="obs-promotion"
                           value={fields.promotion}
                           onChange={(e) =>
-                            setFields((f) => ({
-                              ...f,
+                            setFields((currentFields) => ({
+                              ...currentFields,
                               promotion: e.target.value as Fields["promotion"],
                             }))
                           }
@@ -833,7 +1046,10 @@ export default function ObservationsPage() {
                       placeholder="Known fees, unusual events, or context worth keeping"
                       value={fields.notes}
                       onChange={(e) =>
-                        setFields((f) => ({ ...f, notes: e.target.value }))
+                        setFields((currentFields) => ({
+                          ...currentFields,
+                          notes: e.target.value,
+                        }))
                       }
                     />
                     <button type="submit" className="observation-primary">
@@ -850,10 +1066,12 @@ export default function ObservationsPage() {
                         className="use-location-button"
                         onClick={() => {
                           setEditing(null);
+
                           setFields({
                             ...emptyFields,
                             quotedAt: observations.singaporeInput(),
                           });
+
                           setMessage("");
                         }}
                       >
@@ -922,7 +1140,9 @@ export default function ObservationsPage() {
                 className="observation-filters"
                 onSubmit={(e) => {
                   e.preventDefault();
+
                   setError("");
+
                   void refresh(providerFilter, query, 0);
                 }}
               >
@@ -977,34 +1197,36 @@ export default function ObservationsPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {page.records.map((r) => (
-                        <tr key={r.id}>
+                      {page.records.map((observation) => (
+                        <tr key={observation.id}>
                           <td>
-                            {dateLabel(r.quotedAt)}
+                            {dateLabel(observation.quotedAt)}
                             <small>
-                              {r.fareKind} · {r.timeSlot}
+                              {observation.fareKind} · {observation.timeSlot}
                             </small>
                           </td>
                           <td>
-                            {observations.providerNames[r.provider]}
-                            <small>{r.product}</small>
+                            {observations.providerNames[observation.provider]}
+                            <small>{observation.product}</small>
                           </td>
                           <td>
-                            {r.snapshot.trip.pickup.name}
-                            <small>→ {r.snapshot.trip.dropoff.name}</small>
+                            {observation.snapshot.trip.pickup.name}
+                            <small>
+                              → {observation.snapshot.trip.dropoff.name}
+                            </small>
                           </td>
-                          <td>{money(r.priceCents)}</td>
+                          <td>{money(observation.priceCents)}</td>
                           <td>
                             <span
-                              className={`observation-badge${r.contextAligned ? "" : " review"}`}
+                              className={`observation-badge${observation.contextAligned ? "" : " review"}`}
                             >
-                              {r.contextAligned
+                              {observation.contextAligned
                                 ? "Time aligned"
                                 : "Review timing"}
                             </span>
                             <small>
-                              {r.snapshot.trip.route.source} ·{" "}
-                              {r.trafficFreshAtQuote
+                              {observation.snapshot.trip.route.source} ·{" "}
+                              {observation.trafficFreshAtQuote
                                 ? "fresh traffic"
                                 : "baseline / no fresh traffic"}
                             </small>
@@ -1013,7 +1235,7 @@ export default function ObservationsPage() {
                             <button
                               className="use-location-button"
                               disabled={busy}
-                              onClick={() => beginEdit(r)}
+                              onClick={() => beginEdit(observation)}
                             >
                               Correct
                             </button>
@@ -1022,15 +1244,20 @@ export default function ObservationsPage() {
                               disabled={busy}
                               onClick={() => {
                                 setEditing(null);
-                                useSavedTrip(r.snapshot);
+
+                                useSavedTrip(observation.snapshot);
+
                                 setSnapshot(null);
+
                                 setFields({
                                   ...emptyFields,
                                   quotedAt: observations.singaporeInput(),
                                 });
+
                                 setMessage(
                                   "Trip selected. Capture fresh conditions before recording another fare.",
                                 );
+
                                 document
                                   .getElementById("obs-pickup")
                                   ?.scrollIntoView({ behavior: "smooth" });
@@ -1099,7 +1326,9 @@ export default function ObservationsPage() {
               dropoffId: "map-location",
               dropoffCoordinates: coordinates,
             });
+
             setDropoffLabel(location.name);
+
             setMapOpen(false);
           }}
         />

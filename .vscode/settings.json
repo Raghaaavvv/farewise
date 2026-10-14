@@ -1,7 +1,11 @@
 {
   "go.useLanguageServer": true,
   "editor.tabSize": 2,
-  "[go]": { "editor.insertSpaces": false, "editor.defaultFormatter": "golang.go", "editor.formatOnSave": true },
+  "[go]": {
+    "editor.insertSpaces": false,
+    "editor.defaultFormatter": "golang.go",
+    "editor.formatOnSave": true
+  },
   "typescript.tsdk": "frontend/node_modules/typescript/lib",
   "files.exclude": { "**/.next": true, "**/node_modules": true }
 }

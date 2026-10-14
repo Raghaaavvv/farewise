@@ -1,5 +1,8 @@
+// Check traffic timing, coverage and provenance against the route response contract.
 import assert from "node:assert/strict";
+
 import test from "node:test";
+
 import { parseRoute, ResponseValidationError } from "../src/lib/contracts";
 
 const traffic = {
@@ -17,6 +20,7 @@ const traffic = {
   expiresAt: "2026-10-14T10:06:00Z",
   message: "Approximate traffic adjustment",
 };
+
 const route = {
   source: "onemap",
   distanceMeters: 10000,
@@ -27,6 +31,7 @@ const route = {
 
 test("route accepts coherent traffic ranges, coverage and baseline fallback", () => {
   assert.equal(parseRoute(route).traffic?.coverage, 0.5);
+
   const fallback = parseRoute({
     ...route,
     durationSeconds: 1200,
@@ -41,7 +46,9 @@ test("route accepts coherent traffic ranges, coverage and baseline fallback", ()
       maxSeconds: null,
     },
   });
+
   assert.equal(fallback.durationSeconds, 1200);
+
   assert.equal(fallback.trafficAware, false);
 });
 
@@ -57,8 +64,9 @@ test("runtime contract rejects contradictory traffic estimates", () => {
     { ...route, traffic: { ...traffic, expiresAt: traffic.fetchedAt } },
     { ...route, traffic: { ...traffic, observedAt: null } },
     { ...route, source: "approximate", durationSeconds: null },
-  ])
+  ]) {
     assert.throws(() => parseRoute(invalid), ResponseValidationError);
+  }
 });
 
 test("route accepts an explicit unavailable traffic status without invented duration", () => {

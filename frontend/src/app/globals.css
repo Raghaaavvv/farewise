@@ -1,3 +1,4 @@
+/* Shared design tokens. Components below reuse these colors, typefaces and sizes. */
 :root {
   --ink: #213831;
   --muted: #768078;
@@ -56,6 +57,7 @@ main,
   max-width: 1240px;
   margin: 0 auto;
 }
+/* Shared branding and navigation. */
 .site-header {
   display: flex;
   align-items: center;
@@ -126,6 +128,7 @@ main,
 main {
   padding: 0 32px;
 }
+/* Comparison introduction and prototype notice. */
 .hero {
   display: flex;
   justify-content: space-between;
@@ -226,6 +229,7 @@ h1 em {
   padding: 2px;
   display: flex;
 }
+/* Trip controls and the main comparison layout. */
 .comparison-layout {
   display: grid;
   grid-template-columns: 360px minmax(0, 1fr);
@@ -432,6 +436,7 @@ h1 em {
   font-size: 11px;
   color: #a24735;
 }
+/* Route distance, duration and provenance display. */
 .route-preview {
   position: relative;
   background: #eaf0e9;
@@ -508,6 +513,7 @@ h1 em {
   font-size: 9px;
   color: #9da394;
 }
+/* Quote filters, sorting controls and freshness indicators. */
 .results-heading {
   display: flex;
   justify-content: space-between;
@@ -624,6 +630,7 @@ h1 em {
 .expired .status-dot {
   background: #a2803e;
 }
+/* Provider product cards and price-range presentation. */
 .quote-list {
   display: flex;
   flex-direction: column;
@@ -882,6 +889,7 @@ h1 em {
   font-size: 18px;
   color: #8f9d7f;
 }
+/* Request errors, stale-trip notices and loading placeholders. */
 .error-banner {
   padding: 14px;
   background: #fcf0e9;
@@ -1024,6 +1032,7 @@ dialog dd {
 dialog .compare-button {
   margin-top: 22px;
 }
+/* Responsive comparison layout; retain the existing breakpoint and cascade order. */
 @media (min-width: 1500px) {
   .site-header,
   main,
@@ -1510,6 +1519,7 @@ dialog.destination-picker {
   opacity: 0.8;
 }
 
+/* LTA speed-band coverage and baseline timing details. */
 .traffic-summary {
   margin-top: 14px;
   padding: 10px 12px;

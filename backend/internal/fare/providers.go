@@ -1,3 +1,4 @@
+// Simulated provider adapters exercise the comparison flow without contacting ride services.
 package fare
 
 import (
@@ -19,108 +20,225 @@ type Provider interface {
 }
 
 type DemoProvider struct {
-	ProviderID, ProviderName       string
-	BaseCents, CentsPerKM, BaseETA int
-	Latency                        time.Duration
+	ProviderID   string
+	ProviderName string
+	BaseCents    int
+	CentsPerKM   int
+	BaseETA      int
+	Latency      time.Duration
 }
 
-func (p DemoProvider) ID() string   { return p.ProviderID }
-func (p DemoProvider) Name() string { return p.ProviderName }
+// ID returns the stable identifier of this provider adapter.
+func (provider DemoProvider) ID() string {
+	return provider.ProviderID
+}
 
+// Name returns the provider name displayed with its quotes.
+func (provider DemoProvider) Name() string {
+	return provider.ProviderName
+}
+
+// DemoProviders returns four adapters with invented pricing and response timings.
 func DemoProviders() []Provider {
 	return []Provider{
-		DemoProvider{"grab", "Grab", 590, 106, 4, 180 * time.Millisecond},
-		DemoProvider{"gojek", "Gojek", 510, 99, 6, 260 * time.Millisecond},
-		DemoProvider{"zig", "CDG Zig", 620, 97, 3, 140 * time.Millisecond},
-		DemoProvider{"ryde", "Ryde", 450, 94, 8, 310 * time.Millisecond},
+		DemoProvider{
+			ProviderID:   "grab",
+			ProviderName: "Grab",
+			BaseCents:    590,
+			CentsPerKM:   106,
+			BaseETA:      4,
+			Latency:      180 * time.Millisecond,
+		},
+		DemoProvider{
+			ProviderID:   "gojek",
+			ProviderName: "Gojek",
+			BaseCents:    510,
+			CentsPerKM:   99,
+			BaseETA:      6,
+			Latency:      260 * time.Millisecond,
+		},
+		DemoProvider{
+			ProviderID:   "zig",
+			ProviderName: "CDG Zig",
+			BaseCents:    620,
+			CentsPerKM:   97,
+			BaseETA:      3,
+			Latency:      140 * time.Millisecond,
+		},
+		DemoProvider{
+			ProviderID:   "ryde",
+			ProviderName: "Ryde",
+			BaseCents:    450,
+			CentsPerKM:   94,
+			BaseETA:      8,
+			Latency:      310 * time.Millisecond,
+		},
 	}
 }
 
-func (p DemoProvider) Estimate(ctx context.Context, trip Trip) ([]Quote, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+// Estimate waits with cancellation support, then builds simulated products for this trip.
+func (provider DemoProvider) Estimate(ctx context.Context, trip Trip) ([]Quote, error) {
+	contextError := ctx.Err()
+
+	if contextError != nil {
+		return nil, contextError
 	}
-	timer := time.NewTimer(p.Latency)
+
+	timer := time.NewTimer(provider.Latency)
+
 	defer timer.Stop()
+
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
+
 	case <-timer.C:
 	}
 	// A zero-delay timer and cancellation can become ready together.
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	cancellationAfterTimerError := ctx.Err()
+
+	if cancellationAfterTimerError != nil {
+		return nil, cancellationAfterTimerError
 	}
-	if trip.Scenario == "outage" && p.ID() == "ryde" {
+
+	if trip.Scenario == "outage" && provider.ID() == "ryde" {
 		return nil, errors.New("simulated provider failure")
 	}
-	capacity, product := 4, "Standard · demo"
+
+	capacity := 4
+	product := "Standard · demo"
+
 	if trip.RideType == "six" {
-		capacity, product = 6, "6-seater · demo"
+		capacity = 6
+		product = "6-seater · demo"
 	}
+
 	quote := Quote{
-		ProviderID: p.ID(), ProviderName: p.Name(), ServiceName: product,
-		ProductID: trip.RideType, ProductType: ProductStandard,
-		Status: "available", Currency: "SGD", Source: "simulated",
-		Capacity: capacity, FetchedAt: time.Now().UTC(),
+		ProviderID:      provider.ID(),
+		ProviderName:    provider.Name(),
+		ServiceName:     product,
+		ProductID:       trip.RideType,
+		ProductType:     ProductStandard,
+		Status:          "available",
+		Currency:        "SGD",
+		Source:          "simulated",
+		Capacity:        capacity,
+		FetchedAt:       time.Now().UTC(),
 		Message:         "Illustrative quote. Not offered by the provider.",
 		FeesDescription: "Demo total includes an invented airport fee when applicable. No real fees, ERP, discounts or availability are checked.",
 	}
 	// A stable route-based offset produces variety without claiming live refreshes.
 	hash := fnv.New32a()
-	_, _ = hash.Write([]byte(trip.Pickup.ID + trip.Dropoff.ID + p.ID()))
-	amount := p.BaseCents + int(math.Round(trip.DistanceKM*float64(p.CentsPerKM))) + int(hash.Sum32()%180)
+
+	_, _ = hash.Write([]byte(trip.Pickup.ID + trip.Dropoff.ID + provider.ID()))
+
+	// The base, distance rate and route offset are invented demo inputs.
+	amount := provider.BaseCents + int(math.Round(trip.DistanceKM*float64(provider.CentsPerKM))) + int(hash.Sum32()%180)
+
 	if trip.Pickup.ID == "changi-t3" || trip.Pickup.ID == "changi-t1" || trip.Pickup.ID == "jewel" {
 		amount += 500
 	}
+
 	if capacity == 6 {
 		amount = amount * 145 / 100
 	}
-	eta := p.BaseETA
+
+	eta := provider.BaseETA
+
+	// Demo scenarios deliberately change price and pickup time; no live demand is measured.
 	switch trip.Scenario {
 	case "busy":
 		amount = amount * (125 + int(hash.Sum32()%20)) / 100
 		eta += 3
+
 	case "rain":
 		amount = amount * (145 + int(hash.Sum32()%25)) / 100
 		eta += 6
 	}
+
+	// Preserve the demo convention of rounding to the nearest ten cents.
 	amount = (amount + 5) / 10 * 10
-	quote.Fare, quote.ETAMinutes = &FareRange{MinFare: amount, MaxFare: amount}, &eta
+
+	quote.Fare = &FareRange{
+		MinFare: amount,
+		MaxFare: amount,
+	}
+
+	quote.ETAMinutes = &eta
 	// Deliberately different lifetimes exercise per-product expiry in the demo.
-	lifetimes := map[string]time.Duration{"grab": 90 * time.Second, "gojek": 2 * time.Minute, "zig": 75 * time.Second, "ryde": time.Minute}
-	ttl := lifetimes[p.ID()]
+	lifetimes := map[string]time.Duration{
+		"grab":  90 * time.Second,
+		"gojek": 2 * time.Minute,
+		"zig":   75 * time.Second,
+		"ryde":  time.Minute,
+	}
+
+	ttl := lifetimes[provider.ID()]
+
 	if ttl == 0 {
 		ttl = 2 * time.Minute
 	}
+
 	quote.ExpiresAt = quote.FetchedAt.Add(ttl)
+
 	quotes := []Quote{quote}
-	switch p.ID() {
+
+	// Add provider-specific tiers to exercise ranges, expiry and partial responses.
+	switch provider.ID() {
 	case "grab":
 		premium := quote
-		premium.ProductID, premium.ProductType, premium.ServiceName = trip.RideType+"-premium", ProductPremium, "Premium · demo"
-		premium.Fare = &FareRange{amount * 140 / 100, amount * 160 / 100, true}
+		premium.ProductID = trip.RideType + "-premium"
+		premium.ProductType = ProductPremium
+		premium.ServiceName = "Premium · demo"
+		premium.Fare = &FareRange{
+			MinFare:         amount * 140 / 100,
+			MaxFare:         amount * 160 / 100,
+			IsEstimateRange: true,
+		}
 		premium.ExpiresAt = quote.FetchedAt.Add(45 * time.Second)
 		quotes = append(quotes, premium)
+
 	case "zig":
 		taxi := quote
-		taxi.ProductID, taxi.ProductType, taxi.ServiceName = trip.RideType+"-taxi", ProductTaxi, "Metered taxi · demo"
-		taxi.Fare = &FareRange{amount * 90 / 100, amount * 120 / 100, true}
+		taxi.ProductID = trip.RideType + "-taxi"
+		taxi.ProductType = ProductTaxi
+		taxi.ServiceName = "Metered taxi · demo"
+		taxi.Fare = &FareRange{
+			MinFare:         amount * 90 / 100,
+			MaxFare:         amount * 120 / 100,
+			IsEstimateRange: true,
+		}
 		taxi.ExpiresAt = quote.FetchedAt.Add(50 * time.Second)
 		quotes = append(quotes, taxi)
+
 	case "ryde":
 		if trip.RideType == "standard" && trip.Passengers <= 2 {
 			pool := quote
-			pool.ProductID, pool.ProductType, pool.ServiceName, pool.Capacity = "pool", ProductPool, "Shared ride · demo", 2
-			pool.Fare = &FareRange{amount * 70 / 100, amount * 85 / 100, true}
+
+			pool.ProductID = "pool"
+			pool.ProductType = ProductPool
+			pool.ServiceName = "Shared ride · demo"
+			pool.Capacity = 2
+
+			pool.Fare = &FareRange{
+				MinFare:         amount * 70 / 100,
+				MaxFare:         amount * 85 / 100,
+				IsEstimateRange: true,
+			}
+
 			pool.ExpiresAt = quote.FetchedAt.Add(40 * time.Second)
+
 			quotes = append(quotes, pool)
 		}
+
 	case "gojek":
 		if trip.Scenario == "rain" {
-			quotes[0].ETAMinutes, quotes[0].Status = nil, "partial"
+			quotes[0].ETAMinutes = nil
+			quotes[0].Status = "partial"
+
 			quotes[0].Message = "Demo fare is available, but the pickup estimate is missing."
 		}
 	}
+
 	return quotes, nil
 }
