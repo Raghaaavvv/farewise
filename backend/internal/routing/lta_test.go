@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +27,7 @@ func testLTA(t *testing.T, handler http.HandlerFunc) *LTA {
 	client.client = server.Client()
 	client.endpoint = server.URL
 	client.pageInterval = 0
+	client.pageWorkers = 1
 	return client
 }
 func testRow(id string) map[string]any {
@@ -284,5 +287,168 @@ func TestLTARefreshKeepsPreviousFreshSnapshotUsable(t *testing.T) {
 	}
 	if !client.Enrich(context.Background(), eastRoute()).TrafficAware {
 		t.Fatal("failed refresh discarded valid snapshot")
+	}
+}
+
+func TestLTAConcurrentPagesStayBoundedAndFinishInOrder(t *testing.T) {
+	var active, peak atomic.Int32
+	var earlyTerminal atomic.Bool
+	earlierStarted, laterReady := make(chan struct{}), make(chan struct{})
+	client := testLTA(t, func(w http.ResponseWriter, r *http.Request) {
+		n := active.Add(1)
+		defer active.Add(-1)
+		for {
+			previous := peak.Load()
+			if n <= previous || peak.CompareAndSwap(previous, n) {
+				break
+			}
+		}
+		offset, _ := strconv.Atoi(r.URL.Query().Get("$skip"))
+		if offset == 500 {
+			close(earlierStarted)
+			select {
+			case <-laterReady:
+			case <-r.Context().Done():
+				return
+			}
+			time.Sleep(30 * time.Millisecond)
+		}
+		if offset == 1000 {
+			select {
+			case <-earlierStarted:
+			case <-r.Context().Done():
+				return
+			}
+			close(laterReady)
+			earlyTerminal.Store(true)
+			writePage(w, revisionNow(), []map[string]any{testRow("last")})
+			return
+		}
+		if offset > 1000 {
+			writePage(w, revisionNow(), []map[string]any{})
+			return
+		}
+		rows := make([]map[string]any, 500)
+		for i := range rows {
+			rows[i] = testRow(fmt.Sprint(offset + i))
+		}
+		writePage(w, revisionNow(), rows)
+	})
+	client.pageWorkers = 4
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	snapshot, _, err := client.load(ctx)
+	if err != nil || len(snapshot.links) != 1001 {
+		t.Fatal("published an incomplete or out-of-order snapshot", err)
+	}
+	if !earlyTerminal.Load() || peak.Load() < 2 || peak.Load() > 4 {
+		t.Fatal("requests did not overlap within bounded concurrency", peak.Load())
+	}
+}
+
+func TestLTAPagePacerIsSharedAcrossWorkers(t *testing.T) {
+	pacer := &pagePacer{interval: 15 * time.Millisecond}
+	var lock sync.Mutex
+	var starts []time.Time
+	var wait sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if err := pacer.wait(context.Background()); err != nil {
+				t.Error(err)
+			}
+			lock.Lock()
+			starts = append(starts, time.Now())
+			lock.Unlock()
+		}()
+	}
+	wait.Wait()
+	sort.Slice(starts, func(i, j int) bool { return starts[i].Before(starts[j]) })
+	for i := 1; i < len(starts); i++ {
+		if starts[i].Sub(starts[i-1]) < 10*time.Millisecond {
+			t.Fatal("worker pacing multiplied the global request rate")
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if !errors.Is(pacer.wait(ctx), context.Canceled) {
+		t.Fatal("pacing ignored cancellation")
+	}
+}
+
+func TestLTAConcurrent429CancelsEarlierHTTPAndKeepsCooldown(t *testing.T) {
+	earlierStarted, earlierCanceled := make(chan struct{}), make(chan struct{})
+	client := testLTA(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("$skip") {
+		case "0":
+			rows := make([]map[string]any, 500)
+			for i := range rows {
+				rows[i] = testRow(fmt.Sprint(i))
+			}
+			writePage(w, revisionNow(), rows)
+		case "500":
+			close(earlierStarted)
+			<-r.Context().Done()
+			close(earlierCanceled)
+		case "1000":
+			<-earlierStarted
+			w.Header().Set("Retry-After", "120")
+			w.WriteHeader(429)
+		default:
+			writePage(w, revisionNow(), []map[string]any{})
+		}
+	})
+	client.pageWorkers = 2
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	snapshot, _, err := client.load(ctx)
+	var failure *Error
+	if snapshot != nil || !errors.As(err, &failure) || failure.RetryAfter != 120*time.Second || time.Until(client.nextAttempt) < 119*time.Second {
+		t.Fatal("lost rate limit or published partial data", err)
+	}
+	select {
+	case <-earlierCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("429 did not cancel outstanding HTTP")
+	}
+}
+
+func TestLTAConcurrentPageRetryDoesNotRestartSnapshot(t *testing.T) {
+	var lock sync.Mutex
+	calls := map[string]int{}
+	client := testLTA(t, func(w http.ResponseWriter, r *http.Request) {
+		offset := r.URL.Query().Get("$skip")
+		lock.Lock()
+		calls[offset]++
+		attempt := calls[offset]
+		lock.Unlock()
+		if offset == "500" && attempt == 1 {
+			w.WriteHeader(503)
+			return
+		}
+		if offset == "0" || offset == "500" {
+			rows := make([]map[string]any, 500)
+			for i := range rows {
+				rows[i] = testRow(offset + "-" + fmt.Sprint(i))
+			}
+			writePage(w, revisionNow(), rows)
+			return
+		}
+		if offset == "1000" {
+			writePage(w, revisionNow(), []map[string]any{testRow("last")})
+			return
+		}
+		writePage(w, revisionNow(), []map[string]any{})
+	})
+	client.pageWorkers = 4
+	result, _, err := client.load(context.Background())
+	if err != nil || len(result.links) != 1001 {
+		t.Fatal("failed to recover page without discarding collection", err)
+	}
+	lock.Lock()
+	defer lock.Unlock()
+	if calls["0"] != 1 || calls["500"] != 2 || calls["1000"] != 1 {
+		t.Fatal("retried complete snapshot instead of failed page", calls)
 	}
 }

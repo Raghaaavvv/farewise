@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"math/rand"
 	"net/http"
 	"sort"
 	"strconv"
@@ -45,6 +46,7 @@ type LTA struct {
 	nextAttempt   time.Time
 	lastError     error
 	pageInterval  time.Duration
+	pageWorkers   int
 	now           func() time.Time
 }
 
@@ -53,7 +55,7 @@ func NewLTA(key string) (*LTA, error) {
 	if key == "" {
 		return nil, errors.New("LTA_ACCOUNT_KEY is required for LTA traffic")
 	}
-	return &LTA{client: &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, endpoint: speedBandsURL, key: key, pageInterval: 200 * time.Millisecond, now: time.Now}, nil
+	return &LTA{client: &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, endpoint: speedBandsURL, key: key, pageInterval: 200 * time.Millisecond, pageWorkers: 4, now: time.Now}, nil
 }
 
 func (l *LTA) load(ctx context.Context) (*speedSnapshot, bool, error) {
@@ -172,70 +174,141 @@ func (r rawLink) valid() bool {
 	}
 	return *r.StartLat != *r.EndLat || *r.StartLon != *r.EndLon
 }
-func (l *LTA) fetch(ctx context.Context) (*speedSnapshot, error) {
+
+type speedPage struct {
+	updated string
+	rows    []json.RawMessage
+}
+
+// All workers share one pacer. Overlapping HTTP requests must not multiply
+// the overall request-start rate or allow bursts after a slow response.
+type pagePacer struct {
+	mu       sync.Mutex
+	next     time.Time
+	interval time.Duration
+}
+
+func (p *pagePacer) wait(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		p.mu.Lock()
+		now := time.Now()
+		if !p.next.After(now) {
+			p.next = now.Add(p.interval)
+			p.mu.Unlock()
+			return nil
+		}
+		delay := p.next.Sub(now)
+		p.mu.Unlock()
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (l *LTA) fetchPage(ctx context.Context, page int, pacer *pagePacer) (speedPage, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		result, err := l.fetchPageOnce(ctx, page, pacer)
+		var failure *Error
+		if err == nil || attempt == 1 || ctx.Err() != nil || !errors.As(err, &failure) || failure.RetryAfter > 0 ||
+			(failure.Status != 500 && failure.Status != 502 && failure.Status != 503 && failure.Status != 504) {
+			return result, err
+		}
+		delay := 300*time.Millisecond + time.Duration(rand.Int63n(int64(200*time.Millisecond)))
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return speedPage{}, ctx.Err()
+		case <-timer.C:
+		}
+		slog.Info("traffic.page.retry", "offset", page*500, "attempt", 2)
+	}
+	panic("unreachable")
+}
+
+func (l *LTA) fetchPageOnce(ctx context.Context, page int, pacer *pagePacer) (speedPage, error) {
+	if err := pacer.wait(ctx); err != nil {
+		return speedPage{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s?$skip=%d", l.endpoint, page*500), nil)
+	if err != nil {
+		return speedPage{}, trafficFailure()
+	}
+	req.Header.Set("AccountKey", l.key)
+	req.Header.Set("Accept", "application/json")
+	response, err := l.client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return speedPage{}, ctx.Err()
+		}
+		slog.Warn("traffic.page.failed", "offset", page*500, "reason", "transport")
+		return speedPage{}, &Error{Status: 502, Message: "LTA traffic is unavailable."}
+	}
+	var body struct {
+		Updated string             `json:"lastUpdatedTime"`
+		Value   *[]json.RawMessage `json:"value"`
+	}
+	if response.StatusCode != 200 {
+		slog.Warn("traffic.page.failed", "offset", page*500, "reason", "http_status", "status", response.StatusCode)
+		failure := trafficFailure()
+		failure.Status = response.StatusCode
+		if value := response.Header.Get("Retry-After"); value != "" {
+			failure.RetryAfter = retryAfter(value, l.now())
+		}
+		if response.StatusCode == 401 || response.StatusCode == 403 {
+			failure.Message = "LTA access failed. Check the backend API account key."
+		}
+		if response.StatusCode == 429 {
+			failure.Status = http.StatusTooManyRequests
+			failure.Message = "LTA traffic is temporarily rate limited."
+			failure.RetryAfter = retryAfter(response.Header.Get("Retry-After"), l.now())
+		}
+		response.Body.Close()
+		return speedPage{}, failure
+	}
+	limited := io.LimitReader(response.Body, (2<<20)+1)
+	data, readErr := io.ReadAll(limited)
+	response.Body.Close()
+	if ctx.Err() != nil {
+		return speedPage{}, ctx.Err()
+	}
+	if readErr != nil || len(data) > 2<<20 || json.Unmarshal(data, &body) != nil || body.Value == nil || len(*body.Value) > 500 {
+		slog.Warn("traffic.page.failed", "offset", page*500, "reason", "invalid_payload", "bytes", len(data))
+		return speedPage{}, trafficFailure()
+	}
+
+	return speedPage{body.Updated, *body.Value}, nil
+}
+
+func (l *LTA) fetch(parent context.Context) (*speedSnapshot, error) {
+	ctx, cancel := context.WithCancel(parent)
+	var workers sync.WaitGroup
+	// Wait for canceled requests before releasing the shared refresh flight.
+	defer func() { cancel(); workers.Wait() }()
+	pacer := &pagePacer{interval: l.pageInterval}
 	type timedLink struct {
 		link     speedLink
 		observed time.Time
 	}
 	rowsByID := map[string]timedLink{}
-	for page := 0; page < 300; page++ {
-		if page > 0 {
-			timer := time.NewTimer(l.pageInterval)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return nil, ctx.Err()
-			case <-timer.C:
-			}
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s?$skip=%d", l.endpoint, page*500), nil)
-		if err != nil {
-			return nil, trafficFailure()
-		}
-		req.Header.Set("AccountKey", l.key)
-		req.Header.Set("Accept", "application/json")
-		response, err := l.client.Do(req)
-		if err != nil {
-			slog.Warn("traffic.page.failed", "offset", page*500, "reason", "transport")
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			return nil, trafficFailure()
-		}
-		var body struct {
-			Updated string             `json:"lastUpdatedTime"`
-			Value   *[]json.RawMessage `json:"value"`
-		}
-		if response.StatusCode != 200 {
-			slog.Warn("traffic.page.failed", "offset", page*500, "reason", "http_status", "status", response.StatusCode)
-			failure := trafficFailure()
-			if response.StatusCode == 401 || response.StatusCode == 403 {
-				failure.Message = "LTA access failed. Check the backend API account key."
-			}
-			if response.StatusCode == 429 {
-				failure.Message = "LTA traffic is temporarily rate limited."
-				failure.RetryAfter = retryAfter(response.Header.Get("Retry-After"), l.now())
-			}
-			response.Body.Close()
-			return nil, failure
-		}
-		limited := io.LimitReader(response.Body, (2<<20)+1)
-		data, readErr := io.ReadAll(limited)
-		response.Body.Close()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		if readErr != nil || len(data) > 2<<20 || json.Unmarshal(data, &body) != nil || body.Value == nil || len(*body.Value) > 500 {
-			slog.Warn("traffic.page.failed", "offset", page*500, "reason", "invalid_payload", "bytes", len(data))
-			return nil, trafficFailure()
-		}
-		if len(*body.Value) > 0 {
-			revision, parseErr := time.ParseInLocation("2006-01-02 15:04:05", body.Updated, singapore)
+	pages, rows := 0, 0
+	consume := func(page speedPage) {
+		pages++
+		rows += len(page.rows)
+		if len(page.rows) > 0 {
+			revision, parseErr := time.ParseInLocation("2006-01-02 15:04:05", page.updated, singapore)
 			now := l.now()
 			// Page timestamps differ in the live feed. Skip old/invalid pages;
 			// check each retained observation again at publication time.
 			if parseErr == nil && !revision.After(now.Add(time.Minute)) && now.Sub(revision) <= 10*time.Minute {
-				for _, raw := range *body.Value {
+				for _, raw := range page.rows {
 					var row rawLink
 					if json.Unmarshal(raw, &row) != nil || !row.valid() {
 						continue
@@ -248,32 +321,101 @@ func (l *LTA) fetch(ctx context.Context) (*speedSnapshot, error) {
 				}
 			}
 		}
-		if len(*body.Value) < 500 {
-			fetched := l.now()
-			var observed time.Time
-			links := make([]speedLink, 0, len(rowsByID))
-			for _, row := range rowsByID {
-				if fetched.Sub(row.observed) >= 8*time.Minute {
-					continue
+	}
+	finish := func() (*speedSnapshot, error) {
+		fetched := l.now()
+		var observed time.Time
+		links := make([]speedLink, 0, len(rowsByID))
+		for _, row := range rowsByID {
+			if fetched.Sub(row.observed) >= 8*time.Minute {
+				continue
+			}
+			links = append(links, row.link)
+			if observed.IsZero() || row.observed.Before(observed) {
+				observed = row.observed
+			}
+		}
+		if len(links) == 0 {
+			return nil, &Error{Message: "LTA speed observations are stale or invalid."}
+		}
+		sort.Slice(links, func(i, j int) bool { return links[i].id < links[j].id })
+		expiry := fetched.Add(5 * time.Minute)
+		if sourceExpiry := observed.Add(10 * time.Minute); sourceExpiry.Before(expiry) {
+			expiry = sourceExpiry
+		}
+		slog.Info("traffic.collection", "pages", pages, "rows", rows, "fresh_links", len(links), "max_concurrent_requests", l.pageWorkers, "request_interval_ms", l.pageInterval.Milliseconds())
+		return &speedSnapshot{links, observed.UTC(), fetched.UTC(), expiry.UTC()}, nil
+	}
+	// Fetch page zero first: small datasets need exactly one request.
+	first, err := l.fetchPage(ctx, 0, pacer)
+	if err != nil {
+		return nil, err
+	}
+	consume(first)
+	if len(first.rows) < 500 {
+		return finish()
+	}
+	type result struct {
+		index int
+		page  speedPage
+		err   error
+	}
+	concurrency := l.pageWorkers
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if concurrency > 4 {
+		concurrency = 4
+	}
+	results := make(chan result, concurrency)
+	pending := map[int]result{}
+	next, dispatch := 1, 1
+	for next < 300 {
+		// Bound both active requests and out-of-order pages to this window.
+		for dispatch < 300 && dispatch < next+concurrency {
+			index := dispatch
+			dispatch++
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				page, err := l.fetchPage(ctx, index, pacer)
+				select {
+				case results <- result{index, page, err}:
+				case <-ctx.Done():
 				}
-				links = append(links, row.link)
-				if observed.IsZero() || row.observed.Before(observed) {
-					observed = row.observed
-				}
+			}()
+		}
+		var received result
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case received = <-results:
+		}
+		// Stop all outstanding work immediately on a rate-limit response.
+		var limited *Error
+		if errors.As(received.err, &limited) && limited.Status == http.StatusTooManyRequests {
+			return nil, received.err
+		}
+		pending[received.index] = received
+		for {
+			ready, ok := pending[next]
+			if !ok {
+				break
 			}
-			if len(links) == 0 {
-				return nil, &Error{Message: "LTA speed observations are stale or invalid."}
+			delete(pending, next)
+			if ready.err != nil {
+				return nil, ready.err
 			}
-			sort.Slice(links, func(i, j int) bool { return links[i].id < links[j].id })
-			expiry := fetched.Add(5 * time.Minute)
-			if sourceExpiry := observed.Add(10 * time.Minute); sourceExpiry.Before(expiry) {
-				expiry = sourceExpiry
+			consume(ready.page)
+			next++
+			if len(ready.page.rows) < 500 {
+				return finish()
 			}
-			return &speedSnapshot{links, observed.UTC(), fetched.UTC(), expiry.UTC()}, nil
 		}
 	}
 	return nil, &Error{Message: "LTA traffic snapshot exceeded the collection limit."}
 }
+
 func trafficFailure() *Error {
 	return &Error{Message: "LTA traffic is unavailable."}
 }
