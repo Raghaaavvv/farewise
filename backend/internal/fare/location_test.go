@@ -57,3 +57,35 @@ func TestDeviceLocationComparisonAndSwap(t *testing.T) {
 		t.Fatal("identical coordinates with different IDs were accepted")
 	}
 }
+
+func TestMapPointValidationAndSwap(t *testing.T) {
+	coordinates := deviceCoordinates(1.303452345, 103.83512345)
+	location, err := MapLocation(*coordinates)
+	if err != nil || location.ID != "map-location" || location.Latitude != *coordinates.Latitude {
+		t.Fatalf("lost map point: %+v %v", location, err)
+	}
+	request := Request{PickupID: "changi-t3", DropoffID: "map-location", DropoffCoordinates: coordinates, Passengers: 1, RideType: "standard", Scenario: "normal"}
+	trip, err := Validate(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.PickupID, request.DropoffID = request.DropoffID, request.PickupID
+	request.PickupCoordinates, request.DropoffCoordinates = request.DropoffCoordinates, request.PickupCoordinates
+	swapped, err := Validate(request)
+	if err != nil || swapped.Pickup.ID != "map-location" || swapped.Pickup.Latitude != trip.Dropoff.Latitude || swapped.DistanceKM != trip.DistanceKM {
+		t.Fatal("swap lost map coordinates")
+	}
+	request.PickupCoordinates = nil
+	if _, err := Validate(request); err == nil {
+		t.Fatal("accepted map-location without coordinates")
+	}
+	for _, point := range []*Coordinates{deviceCoordinates(0, 0), deviceCoordinates(math.NaN(), 103.8), deviceCoordinates(1.3, 104.503), {}} {
+		if _, err := MapLocation(*point); err == nil {
+			t.Fatal("invalid map point was accepted")
+		}
+	}
+	request = Request{PickupID: "current-location", PickupCoordinates: coordinates, DropoffID: "map-location", DropoffCoordinates: coordinates, Passengers: 1, RideType: "standard", Scenario: "normal"}
+	if _, err := Validate(request); err == nil {
+		t.Fatal("same coordinates with different source IDs were accepted")
+	}
+}

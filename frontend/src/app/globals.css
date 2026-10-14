@@ -1381,3 +1381,131 @@ dialog .compare-button {
     transition: none !important;
   }
 }
+
+/* Interactive OneMap destination picker. The dialog stays above map layers. */
+dialog.destination-picker {
+  width: min(760px, calc(100vw - 24px));
+  padding: 25px;
+  max-height: calc(100dvh - 24px);
+  overflow-y: auto;
+}
+.destination-picker h2 {
+  margin: 14px 0 8px;
+}
+.destination-picker .map-instructions {
+  margin: 0 0 15px;
+  color: #526b5d;
+}
+.destination-map-wrap {
+  position: relative;
+  border: 1px solid #d4dfd2;
+  border-radius: 10px;
+  overflow: hidden;
+}
+.destination-map {
+  height: clamp(250px, 43dvh, 400px);
+  width: 100%;
+  background: #e5eee5;
+  cursor: crosshair;
+}
+.destination-map .leaflet-control-attribution {
+  font-size: 9px;
+  line-height: 1.7;
+  max-width: 100%;
+}
+.destination-map .leaflet-control-attribution img {
+  display: inline-block;
+  vertical-align: middle;
+}
+.destination-map .leaflet-control-zoom a {
+  color: #203d30;
+}
+.destination-map-marker {
+  background: transparent;
+  border: 0;
+}
+.destination-pin-dot {
+  display: block;
+  width: 26px;
+  height: 26px;
+  background: #167e62;
+  border: 4px solid white;
+  border-radius: 50%;
+  box-shadow: 0 2px 9px #132f3466;
+}
+.map-loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+.map-selection-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+}
+.map-selection-row > div {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+}
+.map-selection-row span {
+  color: #617661;
+  font-size: 11px;
+}
+.map-selection-row button {
+  flex-shrink: 0;
+}
+.map-picker-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-top: 12px;
+}
+.map-picker-actions .compare-button {
+  margin: 0;
+  flex: 1;
+}
+.map-cancel-button {
+  min-height: 44px;
+  padding: 12px 20px;
+  border: 1px solid #ced9c9;
+  border-radius: 7px;
+  background: white;
+  color: var(--ink);
+}
+.destination-picker .map-privacy {
+  font-size: 10px;
+  line-height: 1.6;
+}
+.destination-picker .field-error {
+  color: #a24735;
+}
+@media (max-width: 480px) {
+  dialog.destination-picker {
+    padding: 18px;
+  }
+  .destination-picker h2 {
+    font-size: 28px;
+  }
+  .destination-map {
+    height: clamp(230px, 38dvh, 330px);
+  }
+  .map-selection-row {
+    align-items: flex-start;
+  }
+  .map-selection-row button {
+    max-width: 115px;
+  }
+  .map-cancel-button {
+    padding: 12px;
+  }
+}
+.map-picker-saving .destination-map-wrap {
+  pointer-events: none;
+  opacity: 0.8;
+}

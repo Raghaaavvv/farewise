@@ -6,6 +6,24 @@ export type DevicePosition = {
   coordinates: DeviceCoordinates;
 };
 
+export function isCoordinateLocation(id: string): boolean {
+  return id === "current-location" || id === "map-location";
+}
+
+export function withMapLocation(
+  trip: TripRequest,
+  coordinates: DeviceCoordinates,
+): TripRequest {
+  return {
+    ...trip,
+    dropoffId: "map-location",
+    dropoffCoordinates: {
+      latitude: coordinates.latitude,
+      longitude: coordinates.longitude,
+    },
+  };
+}
+
 // Each endpoint owns its snapshot. Capturing drop-off must not replace pickup.
 export function withDeviceLocation(
   trip: TripRequest,
@@ -36,14 +54,12 @@ export function swapTrip(trip: TripRequest): TripRequest {
 }
 
 export function sameEndpoints(trip: TripRequest, catalog: Location[]): boolean {
-  const pickup =
-    trip.pickupId === "current-location"
-      ? trip.pickupCoordinates
-      : catalog.find((l) => l.id === trip.pickupId);
-  const dropoff =
-    trip.dropoffId === "current-location"
-      ? trip.dropoffCoordinates
-      : catalog.find((l) => l.id === trip.dropoffId);
+  const pickup = isCoordinateLocation(trip.pickupId)
+    ? trip.pickupCoordinates
+    : catalog.find((l) => l.id === trip.pickupId);
+  const dropoff = isCoordinateLocation(trip.dropoffId)
+    ? trip.dropoffCoordinates
+    : catalog.find((l) => l.id === trip.dropoffId);
   if (pickup && dropoff)
     return (
       pickup.latitude === dropoff.latitude &&

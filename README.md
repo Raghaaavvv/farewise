@@ -8,9 +8,9 @@ Farewise started with a familiar problem: after landing at the airport, finding 
 
 The current prototype demonstrates the complete frontend-to-backend comparison flow using simulated providers. **Every fare, pickup estimate and availability result is invented. No provider servers are contacted, and the app cannot book rides.** A working comparison interface does not yet mean that live fare access has been solved.
 
-![Farewise prototype showing simulated products, ranges and partial data](docs/images/routing.png)
+![Farewise OneMap destination picker](docs/images/map-picker.png)
 
-[View the iPhone layout](docs/images/routing-iphone.png)
+[View the iPhone map picker](docs/images/map-picker-iphone.png)
 
 ## What works today
 
@@ -41,6 +41,8 @@ Prices are deterministic for the same inputs. Refreshing within the cache window
 | **React** | Components, form state, asynchronous comparison state and interactive results |
 | **TypeScript** | Typed requests, responses, locations, quotes and UI state |
 | **HTML, CSS and SVG** | Semantic controls, responsive layouts, icons and a sourced journey-distance summary |
+| **Leaflet 1.9.4** | Lazily loaded interactive OneMap destination picker with pan/zoom, draggable pins, keyboard selection and visible attribution |
+| **Python 3 (standard library)** | Optional local OneMap token setup and configuration tests; not a fare model |
 | **OneMap REST API** | Optional Singapore driving-route distance and duration, called only from Go with a backend token |
 | **pnpm** | Frontend dependency management and reproducible lockfile-based installs |
 | **Prettier** | Frontend source formatting |
@@ -87,6 +89,10 @@ flowchart TD
     R --> S[POST /api/locations/current]
     S --> T[Go validates coordinates without saving them]
     T --> B
+    AC[Choose drop-off on map] --> AD[Lazy-load Leaflet and public OneMap tiles]
+    AD --> AE[Tap or drag a pin, then confirm]
+    AE --> AF[POST /api/locations/map validates map coordinates]
+    AF --> B
 ```
 
 The service starts at most four workers per comparison and uses a shared semaphore to permit at most four simultaneous `Provider.Estimate` evaluations across all comparisons on that service instance. A five-second total comparison budget includes worker queueing, semaphore waits, cooldowns, retries and adapter execution. A canceled queue does not start more provider calls; completed healthy products remain in the result.
@@ -100,6 +106,7 @@ Provider calls run directly in the workers: a permit is released only when the a
 | Initial page load | Fetches `GET /api/locations`, then sends the default trip to `POST /api/compare` |
 | **Compare rides** | Prevents the normal form submission, captures the current trip, sends JSON, displays loading placeholders, then replaces results |
 | **Use current location** | Calls browser geolocation after the click; sends latitude, longitude and accuracy to `POST /api/locations/current`; selects the returned location and asks the user to compare again |
+| **Choose on map** | Opens a OneMap basemap; tap a point or choose the center, adjust the pin, then confirm through `POST /api/locations/map`; no GPS prompt or routing request occurs on confirmation |
 | **Cancel location lookup** | Aborts the backend request if started, ignores late browser callbacks, and restores manual selection; it cannot dismiss the browser's own permission prompt |
 | **Refresh comparison** or **Retry** | Calls the same comparison function with current form values; successful quotes are reused during the 30-second backend cache window |
 | Change route, passengers, ride type or scenario | Updates local state; previous results remain visible with a notice until comparison is requested again |
@@ -206,7 +213,7 @@ Device acquisition and optional OneMap road routing are implemented; address loo
 
 The journey summary shows numeric distance and duration with source attribution; it is not a navigation map. OneMap routing is requested once per comparison before provider fan-out. Its returned meters are divided by 1,000 without backend rounding, so every provider receives the same road distance. Display rounding does not change fare inputs. Journey duration is separate from the simulated pickup ETA. OneMap’s documented driving response does not establish live traffic awareness or guarantee the shortest route, so `trafficAware` is false.
 
-Each endpoint has its own saved current-location snapshot. Both can use the reserved `current-location` ID, provided their coordinates differ. Capturing one never overwrites the other. Clicking both buttons while stationary will usually produce the same location, which is rejected as a zero-length trip. Choose a different catalog endpoint or capture a second position after moving. Swapping moves coordinates and saved selector options together.
+Each endpoint has its own saved current-location snapshot. The coordinate-source IDs are `current-location` for GPS and `map-location` for a map pin; their coordinate payloads travel with the endpoint when swapping. Capturing one never overwrites the other. The interface requests GPS for pickup and lets users choose a map destination; identical coordinate pairs are rejected even if their source IDs differ. Swapping moves coordinates and saved selector options together.
 
 With OneMap enabled, **Compare rides** sends both endpoint coordinates to OneMap. The coordinate-validation endpoint itself makes no third-party request. Coordinates are not written to disk or included in logs; the existing in-memory quote cache retains hashed trip fingerprints and quote results briefly, without raw coordinates. The interface discloses OneMap sharing before comparison. Request bodies are not placed in URL queries by the browser, but the backend-to-OneMap request follows OneMap’s documented query-parameter format.
 
@@ -267,7 +274,10 @@ The Go tests cover:
 | `TestOneMap429AppliesSharedCooldown` / `TestOneMapPacingAndCancellationBeforeRequest` / `TestOneMapConcurrencyLimitAndCanceledQueue` | Quota cooldown and request pacing block subsequent calls while respecting caller cancellation |
 | `TestRoadDistanceFlowsToEveryProvider` / `TestRoutingFailureDoesNotUseApproximateFare` | A single route feeds all four providers; routing errors prevent fare evaluation instead of hiding failures behind demo distance |
 | `TestInvalidTripsAndLocationCaptureDoNotCallRouter` | Validation failures and coordinate capture do not make external routing requests |
+| `TestMapLocationEndpointAndComparison` / `TestInvalidMapLocationBodies` / `TestMapPointValidationAndSwap` | Confirmed map-source metadata, full coordinate precision, bounds/JSON validation, comparison use and swap behavior |
 | `TestStructuredProviderLogs` | Logs contain latency, outcome and cache fields without adapter secrets or route data |
+
+The three Python setup tests reject malformed/expired authentication responses, prevent token injection into the shell-sourced environment file, preserve unrelated settings and verify owner-only file permissions. Run `python3 -m unittest discover -s scripts/tests`; no real credentials or API calls are used.
 
 Run all local checks:
 
@@ -275,11 +285,12 @@ Run all local checks:
 bash scripts/check.sh
 ```
 
-This runs Go tests with the race detector, `go vet`, frontend location/API unit tests, TypeScript checks and a production Next.js build. GitHub Actions runs the equivalent checks on pushes and pull requests. The Go workflow checks both the supported minimum version and the current development version.
+This runs the local Python token-setup tests, Go tests with the race detector, `go vet`, frontend location/API unit tests, TypeScript checks and a production Next.js build. GitHub Actions runs the equivalent checks on pushes and pull requests. The Go workflow checks both the supported minimum version and the current development version.
 
-The 25 frontend tests cover synthetic geolocation and coordinate requests, runtime response validation (including malformed successful responses), category filtering, product identity, missing ETAs, range display, overlapping ranges, per-product expiry, independent endpoint capture/swapping and routing contract validation. Run them with `pnpm test` from `frontend/`. They do not read anyone's real location or display a real permission prompt.
+The 29 frontend tests cover synthetic geolocation and coordinate requests, runtime response validation (including malformed successful responses), category filtering, product identity, missing ETAs, range display, overlapping ranges, per-product expiry, independent endpoint capture/swapping, map bounds/precision/provenance, map-confirmation cancellation and routing contract validation. Run them with `pnpm test` from `frontend/`. They do not read anyone's real location or display a real permission prompt.
 
-TypeScript checking and a production build are static/build checks. Domain helpers and API boundaries have behavioral unit tests, but a repeatable full browser suite remains a future improvement. Category filtering, multiple products, partial ETA display and product expiry were also checked in the local browser, along with a 390-pixel iPhone layout with no horizontal overflow. The current screenshots show both location buttons and the offline journey-distance summary with synthetic demo fare data. The journey summary remains visible on iPhone.
+TypeScript checking and a production build are static/build checks. Domain helpers and API boundaries have behavioral unit tests, but a repeatable full browser suite remains a future improvement. Category filtering, multiple products, partial ETA display and product expiry were also checked in the local browser, along with a 390-pixel iPhone layout with no horizontal overflow. The current screenshots show the interactive destination picker and a comparison using real OneMap route distance/time with simulated fares. The map dialog and journey summary are checked at a 390-pixel iPhone width without horizontal overflow.
+
 
 ## Challenges and problems identified so far
 
@@ -397,13 +408,25 @@ No ride-provider keys are required. Routing defaults to offline mode and makes n
 
 [OneMap’s official workshop material describes its APIs as free to use](https://www.onemap.gov.sg/apidocs/static/media/OneMap_API_Workshop_Presentation_260825.04f72136081dd249c5ee.pdf), with token-based call quotas.
 
-1. Register through [OneMap’s API documentation](https://www.onemap.gov.sg/apidocs/).
-2. Obtain an access token using its [authentication endpoint](https://www.onemap.gov.sg/apidocs/authentication) with your registered credentials in a POST body. Generate it locally; do not paste credentials or tokens into GitHub or chat.
-3. Copy `backend/.env.example` to `backend/.env`. Set `FAREWISE_ROUTING_PROVIDER=onemap` and `ONEMAP_TOKEN` to your token. This local file is ignored by Git.
+1. Register through [OneMap’s API documentation](https://www.onemap.gov.sg/apidocs/). For this personal project, choose **Others**, **Website**, and describe the map selection and driving-distance use.
+2. If registration provides a token, copy `backend/.env.example` to `backend/.env` (unless the local file already exists), set `FAREWISE_ROUTING_PROVIDER=onemap` and `ONEMAP_TOKEN`, and keep the file private. It is ignored by Git.
+3. To generate or renew a token instead, run `python3 scripts/setup-onemap.py`. The command asks for registered credentials in your own terminal, hides the password, calls the HTTPS [authentication endpoint](https://www.onemap.gov.sg/apidocs/authentication), and atomically saves only the token to `backend/.env` with owner-only file permissions. It does not print the token or save your email/password. Other configuration fields are preserved.
 4. Restart `bash scripts/dev.sh`. This script reads `backend/.env`; a direct `go run ./cmd/server` requires you to export the variables yourself.
 5. Compare two different, road-accessible Singapore points. The summary should change to **Driving distance**, show journey time, and attribute OneMap / Singapore Land Authority. Simulated fares now use that road distance.
 
-OneMap tokens expire after three days and do not automatically renew. Generate a new token, update the local file and restart when access expires. This prototype stores only the token and does not retain account passwords or implement automatic authentication. See the [driving-route API](https://www.onemap.gov.sg/apidocs/routing) for the request/response contract. An authenticated live call has not been verified because no account/token has been supplied; the adapter is covered by local HTTP-server tests. Before reusing routing content in a future training dataset, review the chosen data source’s applicable reuse terms.
+OneMap tokens expire after three days and do not automatically renew. Generate a new token, update the local file and restart when access expires. The local setup command stores only the token; account passwords are not retained and background renewal is not implemented. See the [driving-route API](https://www.onemap.gov.sg/apidocs/routing) for the request/response contract. An authenticated live sample route was verified on 14 October 2026: the Changi-to-Orchard catalog route returned 23,570 meters and 1,883 seconds. These are example responses, not guaranteed values for future queries. Both catalog and map-selected endpoints were tested through the live routing adapter; fares remained simulated. Local HTTP-server tests continue to cover error and cancellation behavior. Before reusing routing content in a future training dataset, review the chosen data source’s applicable reuse terms.
+
+### Interactive map selection
+
+The [official OneMap basemap example](https://www.onemap.gov.sg/docs/maps/index.html) supplies public tiles without a token. Leaflet is dynamically imported only when **Choose on map** opens. The picker preserves OneMap’s required logo and links, supports tap/drag selection and keyboard panning with **Use map center**, and validates OneMap’s published viewing bounds in both TypeScript and Go. The bounds are a viewing rectangle, not an exact national border; the routing API determines road accessibility.
+
+Confirmation validates the coordinate pair through `POST /api/locations/map`, with source `map`, ID `map-location`, and `persisted: false`. Canceling closes the dialog without changing the trip; pending requests and map listeners are cleaned up. Coordinates are preserved at full precision and rounded only in the display. This version uses a **Pinned location** label and does not resolve a street address or implement text search. Address lookup will require a separate token-backed OneMap service.
+
+Basemap display and road routing are separate: the map picker works without an access token, while driving distance/time requires the backend token. In approximate mode the map is real, but the journey distance is still explicitly an approximation and fares are simulated.
+
+### Future traffic features
+
+[LTA’s Traffic Images dataset](https://data.gov.sg/datasets/d_6cdb6b405b25aaaacbaf7689bcc6fae0/view) provides camera images and metadata. Its documented endpoint is `GET https://api.data.gov.sg/v1/transport/traffic-images`; the published API description recommends requesting once per minute, despite source retrieval every 20 seconds. A data.gov.sg key is optional for testing and gives higher limits. Camera images need further processing to become useful congestion features, and are not route travel-time measurements. This feed has not been integrated into Farewise or used to train a model.
 
 ## API contract
 
@@ -412,6 +435,7 @@ OneMap tokens expire after three days and do not automatically renew. Generate a
 | GET | `/api/health` | Service health and demo mode |
 | GET | `/api/locations` | Sample locations, coordinates and `routingSource` for disclosure |
 | POST | `/api/locations/current` | Validated device location, source `device`, and `persisted: false` |
+| POST | `/api/locations/map` | Validated map coordinates, source `map`, ID `map-location`, and `persisted: false` |
 | POST | `/api/compare` | Resolved trip, quotes, source notice and timestamps |
 
 Example comparison request:
@@ -456,13 +480,14 @@ frontend/
   src/lib/api.ts              Validated transport functions and fare formatting
   src/lib/contracts.ts        Response types and narrow runtime parsers
   src/lib/quote-view.ts       Category, ordering, range and expiry helpers
-  src/lib/trip-location.ts    Independent endpoint snapshots, swapping and equality
+  src/lib/trip-location.ts    Coordinate-source snapshots, swapping and equality
+  src/lib/map-selection.ts    OneMap bounds and display-only coordinate formatting
   src/lib/geolocation.ts      Browser permission and location-error handling
   tests/                      Geolocation, API contract and quote behavior tests
   next.config.ts              Same-origin proxy and watcher configuration
 .github/workflows/ci.yml      Automated checks on GitHub
 .vscode/                     Recommended extensions, tasks and debugger
-scripts/                     Startup, toolchain lookup and verification
+scripts/                     Startup, toolchain lookup, local token setup and verification
 docs/images/                Desktop and iPhone screenshots
 Farewise.code-workspace      Portable VS Code workspace
 ```
@@ -475,7 +500,8 @@ Farewise.code-workspace      Portable VS Code workspace
 - [ ] Map actual provider fee inclusions and product names; add model/feature version provenance.
 - [x] Add optional device geolocation with permission, validation, cancellation and manual fallback.
 - [x] Integrate optional OneMap driving-route distance and duration with context cancellation and fake HTTP-server tests.
-- [ ] Configure a OneMap token and verify an authenticated live Singapore route.
+- [x] Configure a local OneMap token and verify authenticated catalog and map-selected routes.
+- [x] Add an interactive OneMap destination picker with coordinate validation, cancellation and attribution.
 - [ ] Add manual address search and geocoding.
 - [ ] Add secure token renewal and a routing-cache policy after reviewing data reuse terms.
 - [x] Implement provider-specific rate limiting, bounded retries and a bounded short-TTL demo cache; test 429 behavior with a fake HTTP server.

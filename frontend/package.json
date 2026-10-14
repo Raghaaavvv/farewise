@@ -16,11 +16,13 @@
     "format": "prettier --write src next.config.ts tsconfig.json package.json"
   },
   "dependencies": {
+    "leaflet": "1.9.4",
     "next": "16.4.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@types/leaflet": "^1.9.22",
     "@types/node": "^24.0.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",

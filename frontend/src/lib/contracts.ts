@@ -287,3 +287,19 @@ export function parseCurrentLocation(value: unknown): {
     return fail();
   return { location, source: "device", persisted: false };
 }
+
+export function parseMapLocation(value: unknown): {
+  location: Location;
+  source: "map";
+  persisted: false;
+} {
+  const obj = record(value),
+    location = parseLocation(obj.location);
+  if (
+    obj.source !== "map" ||
+    obj.persisted !== false ||
+    location.id !== "map-location"
+  )
+    return fail();
+  return { location, source: "map", persisted: false };
+}

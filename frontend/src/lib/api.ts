@@ -3,6 +3,7 @@ import {
   parseComparison,
   parseCurrentLocation,
   parseLocations,
+  parseMapLocation,
 } from "./contracts";
 import type { FareRange } from "./contracts";
 export type {
@@ -83,6 +84,18 @@ export function compareTrip(trip: TripRequest, signal?: AbortSignal) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(trip),
+    signal,
+  });
+}
+
+export function resolveMapLocation(
+  coordinates: DeviceCoordinates,
+  signal?: AbortSignal,
+) {
+  return request("/api/locations/map", parseMapLocation, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(coordinates),
     signal,
   });
 }

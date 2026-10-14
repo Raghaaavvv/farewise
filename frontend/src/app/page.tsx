@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
+import dynamic from "next/dynamic";
 import {
   compareTrip,
   fetchLocations,
@@ -19,6 +20,8 @@ import type {
 } from "@/lib/api";
 import { getDeviceCoordinates } from "@/lib/geolocation";
 import {
+  isCoordinateLocation,
+  withMapLocation,
   sameEndpoints,
   swapTrip,
   withDeviceLocation,
@@ -34,6 +37,12 @@ import {
 import type { ProductFilter } from "@/lib/quote-view";
 import { Icon } from "@/components/icon";
 import { RoutePreview } from "@/components/route-preview";
+import { mapCoordinateLabel } from "@/lib/map-selection";
+
+const DestinationPicker = dynamic(
+  () => import("@/components/destination-picker"),
+  { ssr: false },
+);
 
 const scenarios: {
   id: TripRequest["scenario"];
@@ -61,6 +70,7 @@ export default function Home() {
     useState<RoutingSource>("approximate");
   const [locationMessage, setLocationMessage] = useState("");
   const [locationError, setLocationError] = useState("");
+  const [mapOpen, setMapOpen] = useState(false);
   const [devicePositions, setDevicePositions] = useState<
     Record<Endpoint, DevicePosition | null>
   >({ pickup: null, dropoff: null });
@@ -335,10 +345,9 @@ export default function Home() {
                       setTrip((t) => ({
                         ...t,
                         pickupId: e.target.value,
-                        pickupCoordinates:
-                          e.target.value === "current-location"
-                            ? devicePositions.pickup?.coordinates
-                            : undefined,
+                        pickupCoordinates: isCoordinateLocation(e.target.value)
+                          ? devicePositions.pickup?.coordinates
+                          : undefined,
                       }));
                       setLocationError("");
                       setLocationMessage("");
@@ -381,14 +390,12 @@ export default function Home() {
                     <button
                       type="button"
                       className="use-location-button"
-                      aria-label="Use current location for drop-off"
-                      onClick={() => void useCurrentLocation("dropoff")}
+                      aria-label="Choose drop-off on map"
+                      onClick={() => setMapOpen(true)}
                       disabled={locating || loading || !locations.length}
                     >
                       <Icon name="pin" size={13} />
-                      {locatingEndpoint === "dropoff"
-                        ? "Locating…"
-                        : "Use current location"}
+                      Choose on map
                     </button>
                   </div>
                   <select
@@ -399,10 +406,9 @@ export default function Home() {
                       setTrip((t) => ({
                         ...t,
                         dropoffId: e.target.value,
-                        dropoffCoordinates:
-                          e.target.value === "current-location"
-                            ? devicePositions.dropoff?.coordinates
-                            : undefined,
+                        dropoffCoordinates: isCoordinateLocation(e.target.value)
+                          ? devicePositions.dropoff?.coordinates
+                          : undefined,
                       }))
                     }
                     disabled={locating || (loading && !locations.length)}
@@ -420,6 +426,18 @@ export default function Home() {
                 </div>
               </div>
               <div className="location-feedback">
+                {trip.dropoffId === "map-location" &&
+                  trip.dropoffCoordinates && (
+                    <p className="map-coordinate-note">
+                      Drop-off pin ·{" "}
+                      {mapCoordinateLabel(trip.dropoffCoordinates)}
+                    </p>
+                  )}
+                {trip.pickupId === "map-location" && trip.pickupCoordinates && (
+                  <p className="map-coordinate-note">
+                    Pickup pin · {mapCoordinateLabel(trip.pickupCoordinates)}
+                  </p>
+                )}
                 {locationMessage && <p role="status">{locationMessage}</p>}
                 {locationError && (
                   <p className="field-error" role="alert">
@@ -436,8 +454,9 @@ export default function Home() {
                   </button>
                 )}
                 <p className="location-privacy">
-                  Location is requested only when you click. Coordinates are
-                  sent to this app and aren’t written to disk.
+                  GPS permission is requested only by “Use current location”.
+                  Confirmed coordinates are sent to this app and aren’t written
+                  to disk.
                   {routingSource === "onemap" &&
                     " Comparing sends both locations to OneMap to calculate a driving route."}
                 </p>
@@ -781,6 +800,26 @@ export default function Home() {
         </span>
       </footer>
 
+      {mapOpen && (
+        <DestinationPicker
+          initialLocation={dropoffOptions.find(
+            (location) => location.id === trip.dropoffId,
+          )}
+          onCancel={() => setMapOpen(false)}
+          onConfirm={(location, coordinates) => {
+            setDevicePositions((positions) => ({
+              ...positions,
+              dropoff: { location, coordinates },
+            }));
+            setTrip((t) => withMapLocation(t, coordinates));
+            setLocationError("");
+            setLocationMessage(
+              "Map destination selected. Compare rides to update.",
+            );
+            setMapOpen(false);
+          }}
+        />
+      )}
       <dialog
         ref={dialog}
         onCancel={() => setDetail(null)}
@@ -814,11 +853,11 @@ export default function Home() {
               it cannot book a ride.
             </p>
             <p>
-              Locations are a small sample catalog, or coordinates captured from
-              your device with permission. With OneMap configured, the
-              comparison uses a driving route’s distance and travel time.
-              Otherwise it uses an explicitly labelled approximate distance.
-              Driving time is separate from simulated time to pickup.
+              Choose a destination on OneMap, a sample catalog location, or
+              coordinates captured from your device with permission. With OneMap
+              configured, the comparison uses a driving route’s distance and
+              travel time. Otherwise it uses an explicitly labelled approximate
+              distance. Driving time is separate from simulated time to pickup.
             </p>
           </>
         ) : (

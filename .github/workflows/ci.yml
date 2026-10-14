@@ -34,6 +34,8 @@ jobs:
           cache: false
       - name: Race-enabled tests
         run: go test -race ./...
+      - name: Local token setup tests
+        run: python3 -m unittest discover -s ../scripts/tests
       - name: Static analysis
         run: go vet ./...
 

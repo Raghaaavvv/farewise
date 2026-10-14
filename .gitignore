@@ -10,3 +10,7 @@ backend/.env*
 .DS_Store
 *.log
 .env
+
+# Python setup helper caches
+__pycache__/
+*.pyc
